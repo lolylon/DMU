@@ -439,12 +439,26 @@ export class SchedulingService {
 
     const appt = await this.prisma.appointment.findUnique({
       where: { id: appointmentId },
-      include: { slot: true, case: { include: { participants: true } } },
+      include: {
+        slot: true,
+        case: { include: { participants: true, patient: true } },
+      },
     });
     if (!appt || appt.status !== AppointmentStatus.ACTIVE) {
       throw new NotFoundException('Active appointment not found');
     }
-    this.casesAssertAccess(actor, appt.case);
+
+    const isPatientOwner =
+      !!actor.iinHash &&
+      appt.case.patient.iinHash === actor.iinHash &&
+      actor.memberships.some((m) => m.role === MembershipRole.PATIENT);
+    if (!isPatientOwner) {
+      this.casesAssertAccess(actor, appt.case);
+    } else if (
+      !actor.memberships.some((m) => m.organizationId === appt.organizationId)
+    ) {
+      throw new ForbiddenException('No membership in organization');
+    }
 
     await this.prisma.$transaction(async (tx) => {
       await tx.appointment.update({
@@ -605,6 +619,73 @@ export class SchedulingService {
       out.push({ startsAt, endsAt });
     }
     return out;
+  }
+
+  /**
+   * Bootstrap / pilot helper — Mon–Fri templates + FREE slots for ~14 days.
+   * No auth actor (dev/ALLOW_BOOTSTRAP only callers).
+   */
+  async seedPilotAvailability(organizationId: string, consultantUserId: string) {
+    for (const dayOfWeek of [1, 2, 3, 4, 5]) {
+      await this.prisma.consultantSchedule.upsert({
+        where: {
+          consultantUserId_dayOfWeek_startTime_endTime: {
+            consultantUserId,
+            dayOfWeek,
+            startTime: '09:00',
+            endTime: '17:00',
+          },
+        },
+        create: {
+          organizationId,
+          consultantUserId,
+          dayOfWeek,
+          startTime: '09:00',
+          endTime: '17:00',
+          slotDurationMinutes: 30,
+          breakStart: '13:00',
+          breakEnd: '14:00',
+          timezone: TIMEZONE,
+          active: true,
+        },
+        update: { active: true, slotDurationMinutes: 30 },
+      });
+    }
+
+    const from = new Date();
+    from.setUTCHours(0, 0, 0, 0);
+    const to = new Date(from.getTime() + 14 * 86400000);
+    const schedules = await this.prisma.consultantSchedule.findMany({
+      where: { organizationId, consultantUserId, active: true },
+    });
+
+    let created = 0;
+    for (let t = from.getTime(); t <= to.getTime(); t += 86400000) {
+      const day = new Date(t);
+      const isoDow = ((day.getUTCDay() + 6) % 7) + 1;
+      for (const sch of schedules.filter((s) => s.dayOfWeek === isoDow)) {
+        for (const w of this.expandTemplate(day, sch)) {
+          try {
+            await this.prisma.slot.create({
+              data: {
+                organizationId,
+                consultantUserId,
+                startsAt: w.startsAt,
+                endsAt: w.endsAt,
+                status: SlotStatus.FREE,
+              },
+            });
+            created += 1;
+          } catch (e) {
+            if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+              continue;
+            }
+            throw e;
+          }
+        }
+      }
+    }
+    return { created, from: from.toISOString(), to: to.toISOString() };
   }
 
   private assertOrg(actor: AuthUser, organizationId: string) {

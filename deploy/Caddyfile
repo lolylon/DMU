@@ -1,0 +1,65 @@
+# Pilot HTTPS front. Set DOMAIN in compose (e.g. miru.example.com).
+# DNS: A @DOMAIN and staff.@DOMAIN → VPS IP. Caddy issues Let's Encrypt certs.
+
+{
+	# Global defaults
+	servers {
+		protocols h1 h2
+	}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(self), microphone=(self), geolocation=()"
+		-Server
+	}
+}
+
+{$DOMAIN} {
+	import security_headers
+	encode gzip
+
+	handle /api* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		root * /srv/miniapp
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+staff.{$DOMAIN} {
+	import security_headers
+	encode gzip
+
+	handle /api* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		root * /srv/staff
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+admin.{$DOMAIN} {
+	import security_headers
+	encode gzip
+
+	handle /api* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		root * /srv/admin
+		try_files {path} /index.html
+		file_server
+	}
+}

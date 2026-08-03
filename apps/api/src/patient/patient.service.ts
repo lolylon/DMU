@@ -5,7 +5,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { CaseStatus, MembershipRole, SlotStatus, AppointmentStatus } from '@prisma/client';
+import { CaseStatus, MembershipRole, SlotStatus, AppointmentStatus, CaseMode } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { isValidIin, TIMEZONE } from '@miru/shared';
 import { PrismaService } from '../prisma/prisma.service';
@@ -53,12 +53,20 @@ export class PatientService {
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (recent) {
+    // In prod-like mode block rapid re-issue; bootstrap/dev allows refresh (UI double-submit safe with invalidate below)
+    if (recent && process.env.ALLOW_BOOTSTRAP !== 'true') {
       throw new BadRequestException('Code already requested; wait before retry');
     }
 
     const patients = await this.prisma.patient.findMany({ where: { iinHash: iinHashValue } });
     const code = String(randomInt(100000, 999999));
+
+    // Only one active challenge per IIN — avoid race (double submit) showing stale debugCode
+    await this.prisma.patientAuthChallenge.updateMany({
+      where: { iinHash: iinHashValue, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+
     const challenge = await this.prisma.patientAuthChallenge.create({
       data: {
         iinHash: iinHashValue,
@@ -68,14 +76,35 @@ export class PatientService {
     });
 
     if (patients.length > 0) {
-      const phone = patients.find((p) => p.phone)?.phone ?? `patient:${iinHashValue.slice(0, 8)}`;
-      await this.notifications.enqueue({
-        organizationId: patients[0]!.organizationId,
-        channel: 'sms',
-        templateKey: 'patient_auth_code',
-        recipientRef: phone,
-        payloadMeta: { challengeId: challenge.id },
-      });
+      const withTg = patients.find((p) => p.telegramChatId);
+      const phone = patients.find((p) => p.phone)?.phone;
+      if (withTg?.telegramChatId && process.env.TELEGRAM_BOT_TOKEN) {
+        await this.notifications.enqueue({
+          organizationId: patients[0]!.organizationId,
+          channel: 'telegram',
+          templateKey: 'patient_auth_code',
+          recipientRef: withTg.telegramChatId,
+          payloadMeta: { challengeId: challenge.id },
+          messageText: `Miru: код входа ${code}. Действует ${CODE_TTL_MINUTES} мин.`,
+        });
+      } else if (phone) {
+        await this.notifications.enqueue({
+          organizationId: patients[0]!.organizationId,
+          channel: 'sms',
+          templateKey: 'patient_auth_code',
+          recipientRef: phone,
+          payloadMeta: { challengeId: challenge.id },
+          messageText: `Miru: kod ${code}`,
+        });
+      } else {
+        await this.notifications.enqueue({
+          organizationId: patients[0]!.organizationId,
+          channel: 'stub',
+          templateKey: 'patient_auth_code',
+          recipientRef: `patient:${iinHashValue.slice(0, 8)}`,
+          payloadMeta: { challengeId: challenge.id },
+        });
+      }
     }
 
     const response: {
@@ -89,8 +118,12 @@ export class PatientService {
       message: 'If the IIN is registered, a confirmation code was sent',
     };
 
-    // Dev-only aid — never in production (NFR 12.5)
-    if (process.env.ALLOW_BOOTSTRAP === 'true' && patients.length > 0) {
+    // Local-only aid — never expose OTP over a public / production API (NFR 12.5)
+    if (
+      process.env.ALLOW_BOOTSTRAP === 'true' &&
+      process.env.NODE_ENV !== 'production' &&
+      patients.length > 0
+    ) {
       response.debugCode = code;
     }
 
@@ -104,7 +137,13 @@ export class PatientService {
     return response;
   }
 
-  async verifyCode(input: { iin: string; code: string; ip?: string; userAgent?: string }) {
+  async verifyCode(input: {
+    iin: string;
+    code: string;
+    ip?: string;
+    userAgent?: string;
+    telegramChatId?: string;
+  }) {
     if (!isValidIin(input.iin)) {
       throw new BadRequestException('Invalid IIN checksum');
     }
@@ -126,7 +165,7 @@ export class PatientService {
       throw new ForbiddenException('Too many attempts');
     }
 
-    if (challenge.codeHash !== sha256(input.code)) {
+    if (challenge.codeHash !== sha256(input.code.trim())) {
       await this.prisma.patientAuthChallenge.update({
         where: { id: challenge.id },
         data: { attempts: { increment: 1 } },
@@ -143,6 +182,13 @@ export class PatientService {
     if (patients.length === 0) {
       // Do not confirm existence difference beyond failed auth after code path
       throw new UnauthorizedException('Invalid or expired code');
+    }
+
+    if (input.telegramChatId && /^\d{5,20}$/.test(input.telegramChatId)) {
+      await this.prisma.patient.updateMany({
+        where: { iinHash: iinHashValue },
+        data: { telegramChatId: input.telegramChatId },
+      });
     }
 
     let user = await this.prisma.user.findFirst({
@@ -395,6 +441,142 @@ export class PatientService {
   async bookSlot(actor: AuthUser, caseId: string, slotId: string) {
     await this.requireOwnCase(actor, caseId);
     return this.scheduling.bookSlot(actor, { caseId, slotId });
+  }
+
+  async cancelAppointment(actor: AuthUser, appointmentId: string, reason: string) {
+    this.assertPatient(actor);
+    return this.scheduling.cancelAppointment(actor, appointmentId, reason);
+  }
+
+  /** Start DMU case from public catalog (Mini App) */
+  async startFromCatalog(
+    actor: AuthUser,
+    input: { organizationId: string; profileCode: string; patientFullName: string },
+  ) {
+    this.assertPatient(actor);
+    const iinHash = actor.iinHash!;
+    const name = input.patientFullName.trim();
+    if (name.length < 2) {
+      throw new BadRequestException('Укажите ФИО пациента');
+    }
+
+    const org = await this.prisma.organization.findFirst({
+      where: { id: input.organizationId, catalogPublic: true },
+    });
+    if (!org) {
+      throw new NotFoundException('Organization not in public catalog');
+    }
+
+    const offer = await this.prisma.catalogOffer.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        profileCode: input.profileCode,
+        active: true,
+      },
+    });
+    if (!offer) {
+      throw new BadRequestException('Услуга не найдена в витрине');
+    }
+
+    const sibling = await this.prisma.patient.findFirst({
+      where: { iinHash, telegramChatId: { not: null } },
+      select: { telegramChatId: true, phone: true },
+    });
+
+    let patient = await this.prisma.patient.findUnique({
+      where: {
+        organizationId_iinHash: { organizationId: input.organizationId, iinHash },
+      },
+    });
+    if (!patient) {
+      patient = await this.prisma.patient.create({
+        data: {
+          organizationId: input.organizationId,
+          iinHash,
+          fullName: name,
+          phone: sibling?.phone ?? null,
+          telegramChatId: sibling?.telegramChatId ?? null,
+        },
+      });
+    } else {
+      patient = await this.prisma.patient.update({
+        where: { id: patient.id },
+        data: {
+          fullName: name,
+          ...(sibling?.telegramChatId && !patient.telegramChatId
+            ? { telegramChatId: sibling.telegramChatId }
+            : {}),
+        },
+      });
+    }
+
+    await this.prisma.membership.upsert({
+      where: {
+        userId_organizationId_role: {
+          userId: actor.id,
+          organizationId: input.organizationId,
+          role: MembershipRole.PATIENT,
+        },
+      },
+      create: {
+        userId: actor.id,
+        organizationId: input.organizationId,
+        role: MembershipRole.PATIENT,
+      },
+      update: {},
+    });
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const caseRow = await tx.case.create({
+        data: {
+          organizationId: input.organizationId,
+          patientId: patient.id,
+          mode: CaseMode.REALTIME,
+          status: CaseStatus.CREATED,
+          profileCode: input.profileCode,
+          participants: {
+            create: { userId: actor.id, role: MembershipRole.PATIENT },
+          },
+        },
+      });
+      await tx.caseStatusHistory.create({
+        data: {
+          caseId: caseRow.id,
+          fromStatus: null,
+          toStatus: CaseStatus.CREATED,
+          actorId: actor.id,
+          reason: 'miniapp_catalog_start',
+        },
+      });
+      const awaiting = await tx.case.update({
+        where: { id: caseRow.id },
+        data: { status: CaseStatus.AWAITING_CONSENT },
+      });
+      await tx.caseStatusHistory.create({
+        data: {
+          caseId: caseRow.id,
+          fromStatus: CaseStatus.CREATED,
+          toStatus: CaseStatus.AWAITING_CONSENT,
+          actorId: actor.id,
+          reason: 'awaiting_consent',
+        },
+      });
+      return awaiting;
+    });
+
+    return this.getMyCase(actor, created.id);
+  }
+
+  async bindTelegramChat(actor: AuthUser, telegramChatId: string) {
+    this.assertPatient(actor);
+    if (!/^\d{5,20}$/.test(telegramChatId)) {
+      throw new BadRequestException('Invalid telegramChatId');
+    }
+    const result = await this.prisma.patient.updateMany({
+      where: { iinHash: actor.iinHash! },
+      data: { telegramChatId },
+    });
+    return { ok: true, updated: result.count };
   }
 
   private assertPatient(actor: AuthUser) {

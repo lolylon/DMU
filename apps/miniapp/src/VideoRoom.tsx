@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Room, RoomEvent, Track } from 'livekit-client';
+import { Room, RoomEvent, Track, ConnectionState } from 'livekit-client';
 
 export function VideoRoom({
   livekitUrl,
@@ -12,12 +12,15 @@ export function VideoRoom({
 }) {
   const localRef = useRef<HTMLVideoElement>(null);
   const remoteRef = useRef<HTMLDivElement>(null);
+  const roomRef = useRef<Room | null>(null);
   const [status, setStatus] = useState('Подключение…');
-  const [room, setRoom] = useState<Room | null>(null);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const r = new Room({ adaptiveStream: true, dynacast: true });
     let cancelled = false;
+    const r = new Room({ adaptiveStream: true, dynacast: true });
+    roomRef.current = r;
+
     (async () => {
       try {
         r.on(RoomEvent.TrackSubscribed, (track) => {
@@ -28,21 +31,50 @@ export function VideoRoom({
           }
         });
         r.on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()));
+        r.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
+          if (state === ConnectionState.Reconnecting) setStatus('Переподключение…');
+          if (state === ConnectionState.Connected) setStatus('В сессии');
+        });
+        r.on(RoomEvent.Disconnected, () => {
+          if (!cancelled) {
+            setConnected(false);
+            setStatus('Отключено');
+          }
+        });
+
+        setStatus('Подключение к медиасерверу…');
         await r.connect(livekitUrl, token);
         if (cancelled) return r.disconnect();
-        await r.localParticipant.setCameraEnabled(true);
-        await r.localParticipant.setMicrophoneEnabled(true);
-        const cam = r.localParticipant.getTrackPublication(Track.Source.Camera);
-        if (cam?.track && localRef.current) cam.track.attach(localRef.current);
-        setStatus('В сессии');
-        setRoom(r);
+        setConnected(true);
+
+        const notes: string[] = [];
+        try {
+          await r.localParticipant.setMicrophoneEnabled(true);
+        } catch {
+          notes.push('микрофон недоступен');
+        }
+        try {
+          await r.localParticipant.setCameraEnabled(true);
+          const cam = r.localParticipant.getTrackPublication(Track.Source.Camera);
+          if (cam?.track && localRef.current) cam.track.attach(localRef.current);
+        } catch {
+          notes.push('камера недоступна');
+        }
+        setStatus(notes.length ? `В сессии (${notes.join(', ')})` : 'В сессии');
       } catch (e) {
-        setStatus(e instanceof Error ? e.message : 'Ошибка');
+        const msg = e instanceof Error ? e.message : 'Ошибка';
+        setStatus(
+          /getUserMedia|Permission|NotFound|NotAllowed/i.test(msg)
+            ? `Медиа: ${msg}`
+            : `Нет связи с видеосервером (${livekitUrl}): ${msg}`,
+        );
       }
     })();
+
     return () => {
       cancelled = true;
       r.disconnect();
+      roomRef.current = null;
     };
   }, [livekitUrl, token]);
 
@@ -54,11 +86,11 @@ export function VideoRoom({
       <button
         type="button"
         onClick={() => {
-          room?.disconnect();
+          roomRef.current?.disconnect();
           onLeave?.();
         }}
       >
-        Выйти из видео
+        {connected ? 'Выйти из видео' : 'Закрыть'}
       </button>
     </div>
   );

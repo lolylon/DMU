@@ -59,6 +59,24 @@ type QueueItem = Conclusion & {
 const tokenKey = 'miru_staff_token';
 const CONSULTANT_IIN_HINT = '880101300000';
 
+const statusRu: Record<string, string> = {
+  CREATED: 'Создан',
+  AWAITING_CONSENT: 'Нужны согласия',
+  AWAITING_BOOKING: 'Выберите время',
+  BOOKED: 'Запись оформлена',
+  IN_SESSION: 'Идёт консультация',
+  AWAITING_CONCLUSION: 'Ждём заключение',
+  AWAITING_SIGNATURE: 'На подписи',
+  AWAITING_PATIENT_DELIVERY: 'Заключение готово',
+  CLOSED: 'Закрыт',
+  CANCELLED: 'Отменён',
+  RESCHEDULED: 'Перенос',
+};
+
+function labelStatus(s: string) {
+  return statusRu[s] ?? s;
+}
+
 async function api<T>(path: string, init: RequestInit = {}, token?: string | null): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
@@ -101,41 +119,15 @@ export function App() {
   });
   const [signerIin, setSignerIin] = useState(CONSULTANT_IIN_HINT);
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [tab, setTab] = useState<'cases' | 'sign' | 'dash' | 'registry' | 'queue'>('cases');
-  const [profileQueue, setProfileQueue] = useState<
+  const [tab, setTab] = useState<'cases' | 'sign' | 'sos'>('cases');
+  const [emergencies, setEmergencies] = useState<
     Array<{
       id: string;
-      profileCode: string;
-      status: string;
-      case: { id: string; status: string; patient: { fullName: string } };
+      createdAt: string;
+      note: string | null;
+      device: { label: string; deviceCode: string };
     }>
   >([]);
-  const [participantUserId, setParticipantUserId] = useState('');
-  const [profileCodeClaim, setProfileCodeClaim] = useState('therapy');
-  const [dashboard, setDashboard] = useState<null | {
-    organization: { nameRu: string; misMode: string };
-    casesByStatus: Record<string, number>;
-    readyToSign: number;
-    pendingMisEntry: number;
-    closedToday: number;
-  }>(null);
-  const [registry, setRegistry] = useState<null | {
-    day: string;
-    totals: { rendered: number; enteredInMis: number; pending: number };
-    rows: Array<{
-      caseId: string;
-      patientName: string;
-      caseStatus: string;
-      referralNumber: string | null;
-      enteredInMis: boolean;
-    }>;
-  }>(null);
-  const [registryDay, setRegistryDay] = useState(() => new Date().toISOString().slice(0, 10));
-  const [referral, setReferral] = useState('');
-  const [bridge, setBridge] = useState<null | {
-    misMode: string;
-    entry: null | { referralNumber: string | null; enteredInMis: boolean };
-  }>(null);
 
   const orgId = useMemo(() => user?.memberships[0]?.organizationId ?? null, [user]);
 
@@ -227,46 +219,15 @@ export function App() {
   }, [token, orgId, tab]);
 
   useEffect(() => {
-    if (!token || !orgId || tab !== 'dash') return;
-    api<NonNullable<typeof dashboard>>(`/api/mis/dashboard?organizationId=${orgId}`, {}, token)
-      .then(setDashboard)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Dashboard failed'));
+    if (!token || !orgId || tab !== 'sos') return;
+    const load = () =>
+      api<typeof emergencies>(`/api/frontdesk/emergencies?organizationId=${orgId}`, {}, token)
+        .then(setEmergencies)
+        .catch((err) => setError(err instanceof Error ? err.message : 'SOS failed'));
+    void load();
+    const id = window.setInterval(() => void load(), 8000);
+    return () => clearInterval(id);
   }, [token, orgId, tab]);
-
-  useEffect(() => {
-    if (!token || !orgId || tab !== 'queue') return;
-    api<typeof profileQueue>(
-      `/api/scheduling/queue?organizationId=${orgId}&profileCode=${profileCodeClaim}`,
-      {},
-      token,
-    )
-      .then(setProfileQueue)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Queue failed'));
-  }, [token, orgId, tab, profileCodeClaim]);
-
-  useEffect(() => {
-    if (!token || !orgId || tab !== 'registry') return;
-    api<NonNullable<typeof registry>>(
-      `/api/mis/registry?organizationId=${orgId}&day=${registryDay}`,
-      {},
-      token,
-    )
-      .then(setRegistry)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Registry failed'));
-  }, [token, orgId, tab, registryDay]);
-
-  useEffect(() => {
-    if (!token || !selectedId || tab !== 'cases') return;
-    api<{
-      misMode: string;
-      entry: null | { referralNumber: string | null; enteredInMis: boolean };
-    }>(`/api/mis/cases/${selectedId}`, {}, token)
-      .then((b) => {
-        setBridge(b);
-        setReferral(b.entry?.referralNumber ?? '');
-      })
-      .catch(() => setBridge(null));
-  }, [token, selectedId, tab, conclusion?.status, detail?.status]);
 
   async function saveDraft() {
     if (!token || !selectedId) return;
@@ -351,40 +312,12 @@ export function App() {
     }
   }
 
-  async function signDev(caseId: string) {
-    if (!token) return;
-    setLoading(true);
-    setError(null);
-    try {
-      await api(
-        `/api/conclusions/cases/${caseId}/sign-dev`,
-        { method: 'POST', body: JSON.stringify({ signerIin }) },
-        token,
-      );
-      if (selectedId === caseId) {
-        await loadConclusion(token, caseId);
-        setDetail(await api<CaseDetail>(`/api/cases/${caseId}`, {}, token));
-      }
-      if (orgId) {
-        await refreshCases(token, orgId);
-        await loadQueue(token, orgId);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Dev sign failed');
-    } finally {
-      setLoading(false);
-    }
-  }
-
   if (!token || !user) {
     return (
       <main className="shell">
         <p className="brand">Miru Remote</p>
         <h1>Вход медработника</h1>
-        <p className="lead">
-          Логин + пароль + TOTP. Секрет: <code>POST /api/bootstrap/demo</code> → поле{' '}
-          <code>consultant.totpSecret</code> в Google Authenticator (Time-based).
-        </p>
+        <p className="lead">Email, пароль и код из Authenticator.</p>
         <form className="form" onSubmit={login}>
           <label>
             Email
@@ -424,7 +357,6 @@ export function App() {
         <div>
           <p className="brand">Miru Remote</p>
           <strong>{user.displayName}</strong>
-          <span className="muted"> · {user.memberships.map((m) => m.role).join(', ')}</span>
         </div>
         <div className="tabs">
           <button type="button" className={tab === 'cases' ? 'tab active' : 'tab'} onClick={() => setTab('cases')}>
@@ -433,18 +365,8 @@ export function App() {
           <button type="button" className={tab === 'sign' ? 'tab active' : 'tab'} onClick={() => setTab('sign')}>
             К подписи
           </button>
-          <button type="button" className={tab === 'queue' ? 'tab active' : 'tab'} onClick={() => setTab('queue')}>
-            Очередь профиля
-          </button>
-          <button type="button" className={tab === 'dash' ? 'tab active' : 'tab'} onClick={() => setTab('dash')}>
-            Дашборд
-          </button>
-          <button
-            type="button"
-            className={tab === 'registry' ? 'tab active' : 'tab'}
-            onClick={() => setTab('registry')}
-          >
-            Реестр МИС
+          <button type="button" className={tab === 'sos' ? 'tab active' : 'tab'} onClick={() => setTab('sos')}>
+            SOS киоск
           </button>
           <button type="button" className="ghost" onClick={logout}>
             Выйти
@@ -454,120 +376,50 @@ export function App() {
 
       {error && <p className="error banner">{error}</p>}
 
-      {tab === 'queue' && (
+      {tab === 'sos' && (
         <section className="panel">
-          <h2>FIFO очередь по профилю</h2>
-          <label className="inline">
-            Профиль
-            <input value={profileCodeClaim} onChange={(e) => setProfileCodeClaim(e.target.value)} />
-          </label>
-          <button
-            type="button"
-            disabled={loading}
-            onClick={async () => {
-              if (!token || !orgId) return;
-              setLoading(true);
-              try {
-                const res = await api<{ empty: boolean; item?: { case: { id: string } } }>(
-                  '/api/scheduling/queue/claim',
-                  {
-                    method: 'POST',
-                    body: JSON.stringify({ organizationId: orgId, profileCode: profileCodeClaim }),
-                  },
-                  token,
-                );
-                if (res.empty) setError('Очередь пуста');
-                else if (res.item) {
-                  setSelectedId(res.item.case.id);
-                  setTab('cases');
-                }
-              } catch (err) {
-                setError(err instanceof Error ? err.message : 'Claim failed');
-              } finally {
-                setLoading(false);
-              }
-            }}
-          >
-            Взять следующий (FIFO)
-          </button>
+          <h2>Экстренные вызовы с киосков</h2>
+          <p className="muted">Открытые вызовы с киосков</p>
           <ul className="list">
-            {profileQueue.map((q) => (
-              <li key={q.id} className="queue-row">
+            {emergencies.map((e) => (
+              <li key={e.id} className="queue-row">
                 <div>
-                  <strong>{q.case.patient.fullName}</strong>
+                  <strong>{e.device.label}</strong>
                   <span className="muted">
                     {' '}
-                    · {q.profileCode} · {q.status}
+                    · {e.device.deviceCode} · {new Date(e.createdAt).toLocaleString('ru-KZ')}
                   </span>
+                  {e.note && <div className="muted">{e.note}</div>}
                 </div>
-                <button type="button" className="ghost" onClick={() => { setSelectedId(q.case.id); setTab('cases'); }}>
-                  Открыть
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={async () => {
+                    if (!token) return;
+                    setLoading(true);
+                    try {
+                      await api(`/api/frontdesk/emergencies/${e.id}/ack`, { method: 'POST' }, token);
+                      setEmergencies((prev) => prev.filter((x) => x.id !== e.id));
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : 'Ack failed');
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                >
+                  Принято
                 </button>
               </li>
             ))}
-            {profileQueue.length === 0 && <li className="muted">Нет заявок в очереди</li>}
           </ul>
-        </section>
-      )}
-
-      {tab === 'dash' && dashboard && (
-        <section className="panel">
-          <h2>Дашборд МО — {dashboard.organization.nameRu}</h2>
-          <p className="muted">Режим МИС: {dashboard.organization.misMode}</p>
-          <ul className="stats">
-            <li>Закрыто сегодня: <strong>{dashboard.closedToday}</strong></li>
-            <li>К подписи: <strong>{dashboard.readyToSign}</strong></li>
-            <li>Не внесено в МИС: <strong>{dashboard.pendingMisEntry}</strong></li>
-          </ul>
-          <h3>По статусам</h3>
-          <ul className="list">
-            {Object.entries(dashboard.casesByStatus).map(([st, n]) => (
-              <li key={st}>
-                <span className="badge">{st}</span> {n}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {tab === 'registry' && (
-        <section className="panel">
-          <h2>Реестр «оказано vs внесено»</h2>
-          <label className="inline">
-            День
-            <input type="date" value={registryDay} onChange={(e) => setRegistryDay(e.target.value)} />
-          </label>
-          {registry && (
-            <>
-              <p>
-                Оказано: <strong>{registry.totals.rendered}</strong> · внесено:{' '}
-                <strong>{registry.totals.enteredInMis}</strong> · ожидает:{' '}
-                <strong>{registry.totals.pending}</strong>
-              </p>
-              <ul className="list">
-                {registry.rows.map((r) => (
-                  <li key={r.caseId} className="queue-row">
-                    <div>
-                      <strong>{r.patientName}</strong>
-                      <span className="muted">
-                        {' '}
-                        · {r.referralNumber ?? 'без направления'} · {r.caseStatus}
-                      </span>
-                    </div>
-                    <span className="badge">{r.enteredInMis ? 'в МИС' : 'ожидает'}</span>
-                  </li>
-                ))}
-                {registry.rows.length === 0 && <li className="muted">Нет записей за день</li>}
-              </ul>
-            </>
-          )}
+          {!emergencies.length && <p className="muted">Открытых вызовов нет</p>}
         </section>
       )}
 
       {tab === 'sign' && (
         <section className="panel">
-          <h2>Очередь на подпись (NCALayer)</h2>
-          <p className="muted">Пакетная подпись по ТЗ 9.3.5. ИИН в сертификате должен совпасть с учётной записью.</p>
+          <h2>Очередь на подпись</h2>
+          <p className="muted">Подпись через NCALayer</p>
           <label className="inline">
             ИИН подписанта
             <input value={signerIin} onChange={(e) => setSignerIin(e.target.value)} maxLength={12} />
@@ -577,14 +429,10 @@ export function App() {
               <li key={q.id} className="queue-row">
                 <div>
                   <strong>{q.case.patient.fullName}</strong>
-                  <span className="muted"> · {q.case.id.slice(0, 8)}…</span>
                 </div>
                 <div className="actions">
                   <button type="button" disabled={loading} onClick={() => signWithNca(q.case.id)}>
                     NCALayer
-                  </button>
-                  <button type="button" className="ghost" disabled={loading} onClick={() => signDev(q.case.id)}>
-                    Dev-подпись
                   </button>
                 </div>
               </li>
@@ -608,7 +456,7 @@ export function App() {
                     onClick={() => setSelectedId(c.id)}
                   >
                     <span>{c.patient.fullName}</span>
-                    <span className="badge">{c.status}</span>
+                    <span className="badge">{labelStatus(c.status)}</span>
                   </button>
                 </li>
               ))}
@@ -624,9 +472,9 @@ export function App() {
                 <p>
                   <strong>{detail.patient.fullName}</strong>
                 </p>
-                <p className="muted">ID: {detail.id}</p>
                 <p>
-                  Статус: <span className="badge">{detail.status}</span> · режим {detail.mode}
+                  Статус: <span className="badge">{labelStatus(detail.status)}</span> ·{' '}
+                  {detail.mode === 'REALTIME' ? 'Онлайн' : detail.mode}
                 </p>
                 {detail.activeAppointment && (
                   <p>
@@ -640,7 +488,7 @@ export function App() {
                 {(detail.status === 'BOOKED' || detail.status === 'IN_SESSION') && (
                   <div className="session-box">
                     <h3>Видеосессия</h3>
-                    <p className="muted">Старт только при доступной записи (ТЗ 6.3.3).</p>
+                    <p className="muted">Видеосвязь с пациентом</p>
                     {!media && (
                       <button
                         type="button"
@@ -690,7 +538,7 @@ export function App() {
                           <ul>
                             {chat.map((m) => (
                               <li key={m.id}>
-                                <span className="muted">{m.authorId.slice(0, 6)}</span>: {m.body}
+                                <span className="muted">Участник</span>: {m.body}
                               </li>
                             ))}
                           </ul>
@@ -782,26 +630,7 @@ export function App() {
                         <button type="button" disabled={loading} onClick={() => signWithNca(detail.id)}>
                           Подписать NCALayer
                         </button>
-                        <button type="button" className="ghost" disabled={loading} onClick={() => signDev(detail.id)}>
-                          Dev-подпись
-                        </button>
                       </div>
-                    )}
-                    {conclusion?.versions && conclusion.versions.length > 0 && (
-                      <ol className="history">
-                        {conclusion.versions.map((v) => (
-                          <li key={v.id}>
-                            v{v.versionNumber} · {v.contentHash.slice(0, 12)}…
-                            {v.signedAt && (
-                              <span className="muted">
-                                {' '}
-                                ·{' '}
-                                {new Date(v.signedAt).toLocaleString('ru-KZ', { timeZone: 'Asia/Almaty' })}
-                              </span>
-                            )}
-                          </li>
-                        ))}
-                      </ol>
                     )}
                     {(conclusion?.status === 'SIGNED' || conclusion?.status === 'DELIVERED') && (
                       <button
@@ -822,159 +651,6 @@ export function App() {
                     )}
                   </div>
                 )}
-
-                <div className="session-box">
-                  <h3>Участники и async</h3>
-                  {detail.mode === 'ASYNC' && detail.status !== 'AWAITING_CONCLUSION' && detail.status !== 'CLOSED' && (
-                    <button
-                      type="button"
-                      disabled={loading}
-                      onClick={async () => {
-                        if (!token) return;
-                        setLoading(true);
-                        try {
-                          await api(`/api/cases/${detail.id}/async/submit`, { method: 'POST' }, token);
-                          setDetail(await api<CaseDetail>(`/api/cases/${detail.id}`, {}, token));
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : 'Async submit failed');
-                        } finally {
-                          setLoading(false);
-                        }
-                      }}
-                    >
-                      Async → к заключению (без видео)
-                    </button>
-                  )}
-                  <div className="actions">
-                    <input
-                      placeholder="userId участника (ВА)"
-                      value={participantUserId}
-                      onChange={(e) => setParticipantUserId(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={loading || !participantUserId}
-                      onClick={async () => {
-                        if (!token) return;
-                        await api(
-                          `/api/cases/${detail.id}/participants`,
-                          {
-                            method: 'POST',
-                            body: JSON.stringify({
-                              userId: participantUserId,
-                              role: 'AMBULATORY_WORKER',
-                            }),
-                          },
-                          token,
-                        );
-                        setDetail(await api<CaseDetail>(`/api/cases/${detail.id}`, {}, token));
-                      }}
-                    >
-                      Добавить ВА (сценарий B)
-                    </button>
-                  </div>
-                </div>
-
-                <div className="session-box">
-                  <h3>Досье и МИС</h3>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      disabled={loading}
-                      onClick={async () => {
-                        if (!token) return;
-                        setLoading(true);
-                        try {
-                          const d = await api<{
-                            url: string;
-                            assemblyMs: number;
-                            withinSla: boolean;
-                            checksumSha256: string;
-                          }>(`/api/dossiers/cases/${detail.id}`, { method: 'POST' }, token);
-                          window.open(d.url, '_blank');
-                          setError(
-                            null,
-                          );
-                          alert(
-                            `Досье собрано за ${d.assemblyMs} мс (SLA 60с: ${d.withinSla ? 'OK' : 'FAIL'})\nSHA-256: ${d.checksumSha256.slice(0, 16)}…`,
-                          );
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : 'Dossier failed');
-                        } finally {
-                          setLoading(false);
-                        }
-                      }}
-                    >
-                      Собрать досье
-                    </button>
-                  </div>
-                  {bridge && (
-                    <div className="conclusion-form">
-                      <p className="muted">
-                        МИС: {bridge.misMode}
-                        {bridge.entry?.enteredInMis ? ' · внесено' : ' · не внесено'}
-                      </p>
-                      <label>
-                        Номер направления
-                        <input value={referral} onChange={(e) => setReferral(e.target.value)} />
-                      </label>
-                      <div className="actions">
-                        <button
-                          type="button"
-                          disabled={loading}
-                          onClick={async () => {
-                            if (!token) return;
-                            await api(
-                              `/api/mis/cases/${detail.id}/referral`,
-                              { method: 'POST', body: JSON.stringify({ referralNumber: referral }) },
-                              token,
-                            );
-                            const b = await api<NonNullable<typeof bridge>>(
-                              `/api/mis/cases/${detail.id}`,
-                              {},
-                              token,
-                            );
-                            setBridge(b);
-                          }}
-                        >
-                          Сохранить направление
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          disabled={loading}
-                          onClick={async () => {
-                            if (!token) return;
-                            await api(`/api/mis/cases/${detail.id}/entered`, { method: 'POST' }, token);
-                            const b = await api<NonNullable<typeof bridge>>(
-                              `/api/mis/cases/${detail.id}`,
-                              {},
-                              token,
-                            );
-                            setBridge(b);
-                          }}
-                        >
-                          Отметить внесено в МИС
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <h3>История статусов</h3>
-                <ol className="history">
-                  {detail.statusHistory.map((h) => (
-                    <li key={h.id}>
-                      {h.fromStatus ?? '∅'} → <strong>{h.toStatus}</strong>
-                      {h.reason ? ` (${h.reason})` : ''}
-                      <span className="muted">
-                        {' '}
-                        · {new Date(h.createdAt).toLocaleString('ru-KZ', { timeZone: 'Asia/Almaty' })}
-                      </span>
-                    </li>
-                  ))}
-                </ol>
               </div>
             )}
           </section>

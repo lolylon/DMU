@@ -61,6 +61,42 @@ async function api<T>(path: string, init: RequestInit = {}, token?: string | nul
   return data as T;
 }
 
+function PilotTotpHint() {
+  const [account, setAccount] = useState<{ totpSecret: string; qrDataUrl: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    api<{ tech: { totpSecret: string; qrDataUrl: string } }>('/api/bootstrap/pilot-totp')
+      .then((r) => setAccount(r.tech))
+      .catch(() => setAccount(null));
+  }, []);
+  if (!account) {
+    return (
+      <p className="hint">
+        Ключ 2FA: <code>GET /api/bootstrap/pilot-totp</code> → tech (ALLOW_BOOTSTRAP).
+      </p>
+    );
+  }
+  return (
+    <div className="totp-box">
+      <p className="hint">Отсканируй QR в Google Authenticator (один раз):</p>
+      <img className="totp-qr" src={account.qrDataUrl} alt="QR для Authenticator" width={180} height={180} />
+      <p className="hint">Или введи ключ вручную:</p>
+      <code className="totp-secret">{account.totpSecret}</code>
+      <button
+        type="button"
+        className="ghost"
+        onClick={async () => {
+          await navigator.clipboard.writeText(account.totpSecret);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? 'Скопировано' : 'Копировать ключ'}
+      </button>
+    </div>
+  );
+}
+
 export function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(tokenKey));
   const [user, setUser] = useState<User | null>(null);
@@ -150,10 +186,8 @@ export function App() {
       <main className="shell">
         <p className="brand">Miru Admin</p>
         <h1>Панель внедрения</h1>
-        <p className="lead">
-          Только метаданные МО (ТЗ 11.2). TOTP: <code>POST /api/bootstrap/demo</code> →{' '}
-          <code>tech.totpSecret</code> в Authenticator (Time-based).
-        </p>
+        <p className="lead">Только метаданные МО (ТЗ 11.2). Ключ 2FA постоянный — bootstrap его не меняет.</p>
+        <PilotTotpHint />
         <form className="form" onSubmit={login}>
           <label>
             Email

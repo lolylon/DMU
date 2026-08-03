@@ -6,6 +6,8 @@
 
 ## Документы
 
+- [Видео из дома → клиника](docs/video-remote.md) ← LiveKit Cloud / VPS, не localhost
+- [Пилотный VPS (≈2 чел.)](docs/deploy-pilot-vps.md)
 - [Архитектура](docs/architecture.md) / [PDF](docs/architecture.pdf)
 - [Честный статус соответствия](docs/compliance-status.md) ← читать перед приёмкой
 - [Чеклист недель](docs/week-checklist.md)
@@ -37,23 +39,53 @@ pnpm dev
 | http://localhost:5173 | Staff (врач) |
 | http://localhost:5174 | Admin (внедрение) |
 | http://localhost:5175 | Пациент / витрина |
+| http://localhost:5177 | FrontDesk киоск «Айжан» |
 
-### Пилотные учётки + TOTP
+### Telegram Mini App
+
+1. Токен бота в `.env` / `apps/api/.env` → `TELEGRAM_BOT_TOKEN` (не коммитить).
+2. HTTPS-туннель к miniapp (dev): `npx cloudflared tunnel --url http://localhost:5175`
+3. URL в BotFather (`/editapp`) и в env:
+
+```powershell
+# apps/api/.env
+TELEGRAM_WEBAPP_URL=https://….trycloudflare.com
+```
+
+4. Кнопка меню бота:
+
+```powershell
+Invoke-RestMethod -Method POST -Uri http://localhost:3000/api/bootstrap/telegram-menu `
+  -ContentType 'application/json' `
+  -Body '{}'
+```
+
+Открыть: `t.me/dmu_kaz_bot/miru_remote` (или кнопка меню). После входа по ИИН сохраняется `telegramChatId` для уведомлений.
+
+На Windows при ошибке ExecutionPolicy используй `pnpm.cmd`, не `pnpm`.
+
+### Пилотные учётки + TOTP (постоянные ключи)
+
+TOTP **не ротируется** при повторном bootstrap. Добавь в Authenticator **один раз**:
+
+| Роль | Email | TOTP key |
+|---|---|---|
+| Консультант | `consultant@pilot.miru.local` | `MIRUCONSULTANT22` |
+| ВА | `ambulatory@pilot.miru.local` | `MIRUAMBULATORY22` |
+| Tech | `tech@pilot.miru.local` | `MIRUTECHADMIN2222` |
+
+Пароль: `ChangeMeNow!99`. На экране входа Staff/Admin — **QR для скана** + ключ. Также: `GET http://localhost:3000/api/bootstrap/pilot-totp`.
 
 ```powershell
 Invoke-RestMethod -Method POST -Uri http://localhost:3000/api/bootstrap/demo
 ```
 
-Ответ **всегда** отдаёт свежие `totpSecret` (dev only). Добавь ключ в **Google Authenticator** → Time-based → 6 цифр при входе.
-
-| Роль | Email | URL |
-|---|---|---|
-| Консультант | `consultant@pilot.miru.local` | :5173 |
-| ВА (сценарий B) | `ambulatory@pilot.miru.local` | :5173 |
-| Tech admin | `tech@pilot.miru.local` | :5174 |
-| Пациент | ИИН `900000000009` | :5175 (код в `debugCode`) |
-
-Пароль пилота: `ChangeMeNow!99` (только ALLOW_BOOTSTRAP).
+| Роль | URL |
+|---|---|
+| Консультант | :5173 |
+| ВА (сценарий B) | :5173 |
+| Tech admin | :5174 |
+| Пациент ИИН `900000000009` | :5175 / :5177 |
 
 ## Что умеет Remote сейчас
 

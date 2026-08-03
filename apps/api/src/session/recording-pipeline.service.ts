@@ -13,10 +13,33 @@ import {
 } from 'livekit-server-sdk';
 import { StorageService } from '../storage/storage.service';
 
+function isLoopbackLivekitUrl(url: string): boolean {
+  try {
+    const normalized = url.replace(/^ws/i, 'http');
+    const u = new URL(normalized);
+    const host = u.hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0';
+  } catch {
+    return true;
+  }
+}
+
+function isPrivateLanHost(url: string): boolean {
+  try {
+    const host = new URL(url.replace(/^ws/i, 'http')).hostname;
+    return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * TZ 6.3.3 — session must not start if recording subsystem is unavailable.
  * Production: REQUIRE_LIVEKIT_EGRESS=true (or NODE_ENV=production) requires Egress API.
  * Dev: may run without egress; finalize stores evidence envelope and marks mode honestly.
+ *
+ * Remote consults (patient at home → clinic): clients must get a public wss:// URL
+ * (LiveKit Cloud or RK VPS). Loopback/LAN URLs only with ALLOW_LOCAL_LIVEKIT=true.
  */
 @Injectable()
 export class RecordingPipelineService {
@@ -24,8 +47,9 @@ export class RecordingPipelineService {
 
   constructor(private readonly storage: StorageService) {}
 
+  /** Server SDK host (Cloud or local). Prefer LIVEKIT_URL. */
   livekitHttpHost() {
-    const ws = process.env.LIVEKIT_URL ?? 'ws://localhost:7880';
+    const ws = process.env.LIVEKIT_URL ?? 'ws://127.0.0.1:7880';
     return ws.replace('ws://', 'http://').replace('wss://', 'https://');
   }
 
@@ -35,6 +59,55 @@ export class RecordingPipelineService {
 
   apiSecret() {
     return process.env.LIVEKIT_API_SECRET ?? 'miru_livekit_dev_secret_change_me_32chars';
+  }
+
+  allowLocalLivekit() {
+    return process.env.ALLOW_LOCAL_LIVEKIT === 'true';
+  }
+
+  /**
+   * URL browsers / Telegram WebView use for Room.connect.
+   * Must be reachable from the patient's home network (public wss).
+   */
+  clientLivekitUrl(): string {
+    const url = (
+      process.env.LIVEKIT_PUBLIC_URL ??
+      process.env.LIVEKIT_URL ??
+      'ws://127.0.0.1:7880'
+    ).trim();
+
+    if (this.allowLocalLivekit()) {
+      return url;
+    }
+
+    if (isLoopbackLivekitUrl(url) || isPrivateLanHost(url) || url.startsWith('ws://')) {
+      throw new ServiceUnavailableException(
+        'Видео для вызовов из дома не настроено. Нужен публичный LiveKit (wss): LiveKit Cloud или VPS в РК. См. docs/video-remote.md',
+      );
+    }
+
+    return url;
+  }
+
+  videoRemoteStatus() {
+    let clientUrl: string | null = null;
+    let remoteReady = false;
+    let reason: string | null = null;
+    try {
+      clientUrl = this.clientLivekitUrl();
+      remoteReady = true;
+    } catch (e) {
+      reason = e instanceof Error ? e.message : String(e);
+    }
+    return {
+      remoteReady,
+      allowLocalLivekit: this.allowLocalLivekit(),
+      clientUrlHost: clientUrl
+        ? new URL(clientUrl.replace(/^ws/i, 'http')).host
+        : null,
+      usesLoopbackAdmin: isLoopbackLivekitUrl(process.env.LIVEKIT_URL ?? ''),
+      reason,
+    };
   }
 
   requiresEgress() {
@@ -53,6 +126,9 @@ export class RecordingPipelineService {
   }
 
   async assertReadyOrThrow() {
+    // Fail closed for home→clinic before touching storage/LiveKit
+    this.clientLivekitUrl();
+
     try {
       await this.storage.assertHealthy();
     } catch (e) {
@@ -75,7 +151,6 @@ export class RecordingPipelineService {
       try {
         await this.egressClient().listEgress({ roomName: '__healthcheck_none__' });
       } catch (e) {
-        // listEgress may 404/empty — connection errors matter
         const msg = e instanceof Error ? e.message : String(e);
         if (/ECONNREFUSED|ENOTFOUND|fetch failed|network/i.test(msg)) {
           this.logger.error('LiveKit Egress unhealthy', e as Error);
@@ -83,7 +158,6 @@ export class RecordingPipelineService {
             'Recording egress unavailable. Session cannot start — please reschedule (TZ 6.3.3)',
           );
         }
-        // Other errors (not found room) mean API is reachable
         this.logger.debug(`Egress health probe: ${msg}`);
       }
     }

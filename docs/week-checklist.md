@@ -51,7 +51,8 @@
 - [ ] LiveKit Egress media verified on test-контуре РК
 - [ ] NCA CMS SDK crypto-verify
 - [ ] SMS/Telegram production adapters
-- [ ] FrontDesk F1/F2
+- [x] FrontDesk F1 (kiosk shell + API: запись, emergency gate, OTA check) — см. `docs/frontdesk-f1.md`
+- [ ] FrontDesk F2 (оплата, обращения)
 - [ ] Production MIS adapters (need API specs)
 
 See `docs/compliance-status.md` for honest P0/P1 status.

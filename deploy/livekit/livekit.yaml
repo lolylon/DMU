@@ -1,9 +1,13 @@
-# LiveKit config — development. Rotate keys before shared/prod environments.
+# LiveKit — local Docker. ICE must advertise host LAN IP so phones on Wi‑Fi can reach media.
+# Signaling for Telegram (HTTPS) goes via LIVEKIT_PUBLIC_URL (wss cloudflared tunnel).
+# Rotate keys before shared/prod.
 port: 7880
 rtc:
   tcp_port: 7881
   udp_port: 7882
   use_external_ip: false
+  node_ip: 192.168.0.121
+  allow_tcp_fallback: true
 redis:
   address: redis:6379
 keys:

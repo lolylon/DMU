@@ -1,11 +1,50 @@
 :root {
-  --tg-bg: var(--tg-theme-bg-color, #f4f7f5);
-  --tg-text: var(--tg-theme-text-color, #17241f);
-  --accent: #0b7a5b;
-  --muted: #5f7268;
+  /* Telegram injects --tg-theme-*; fallbacks = light */
+  --bg: var(--tg-theme-bg-color, #f4f7f5);
+  --text: var(--tg-theme-text-color, #17241f);
+  --hint: var(--tg-theme-hint-color, #5f7268);
+  --link: var(--tg-theme-link-color, #0b7a5b);
+  --btn: var(--tg-theme-button-color, #0b7a5b);
+  --btn-text: var(--tg-theme-button-text-color, #ffffff);
+  --surface: var(--tg-theme-secondary-bg-color, #ffffff);
+  --accent: var(--link);
+  --muted: var(--hint);
   --danger: #9b2c2c;
-  --line: #d7e0db;
+  --line: rgba(23, 36, 31, 0.14);
+  --badge-bg: rgba(11, 122, 91, 0.14);
+  color-scheme: light dark;
   font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+/* Explicit dark fallbacks when Telegram vars are incomplete */
+html[data-color-scheme="dark"] {
+  --bg: var(--tg-theme-bg-color, #18211c);
+  --text: var(--tg-theme-text-color, #eef3f0);
+  --hint: var(--tg-theme-hint-color, #9aada3);
+  --link: var(--tg-theme-link-color, #3dce9a);
+  --btn: var(--tg-theme-button-color, #1f9a6f);
+  --btn-text: var(--tg-theme-button-text-color, #ffffff);
+  --surface: var(--tg-theme-secondary-bg-color, #243029);
+  --accent: var(--link);
+  --muted: var(--hint);
+  --danger: #ff8a8a;
+  --line: rgba(238, 243, 240, 0.16);
+  --badge-bg: rgba(61, 206, 154, 0.2);
+}
+
+html[data-color-scheme="light"] {
+  --bg: var(--tg-theme-bg-color, #f4f7f5);
+  --text: var(--tg-theme-text-color, #17241f);
+  --hint: var(--tg-theme-hint-color, #5f7268);
+  --link: var(--tg-theme-link-color, #0b7a5b);
+  --btn: var(--tg-theme-button-color, #0b7a5b);
+  --btn-text: var(--tg-theme-button-text-color, #ffffff);
+  --surface: var(--tg-theme-secondary-bg-color, #ffffff);
+  --accent: var(--link);
+  --muted: var(--hint);
+  --danger: #9b2c2c;
+  --line: rgba(23, 36, 31, 0.14);
+  --badge-bg: rgba(11, 122, 91, 0.14);
 }
 
 * {
@@ -14,8 +53,8 @@
 
 body {
   margin: 0;
-  background: var(--tg-bg);
-  color: var(--tg-text);
+  background: var(--bg);
+  color: var(--text);
 }
 
 .shell {
@@ -31,6 +70,12 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-size: 0.75rem;
+}
+
+h1,
+h2,
+h3 {
+  color: var(--text);
 }
 
 h1 {
@@ -56,10 +101,16 @@ h2 {
   margin-top: 1rem;
 }
 
-label {
+label,
+.name-field {
   display: grid;
   gap: 0.3rem;
   font-size: 0.9rem;
+  color: var(--text);
+}
+
+.name-field {
+  margin: 0.75rem 0;
 }
 
 input {
@@ -67,6 +118,13 @@ input {
   border-radius: 10px;
   padding: 0.7rem 0.8rem;
   font: inherit;
+  background: var(--surface);
+  color: var(--text);
+  caret-color: var(--text);
+}
+
+input::placeholder {
+  color: var(--muted);
 }
 
 button {
@@ -75,8 +133,8 @@ button {
   padding: 0.75rem 1rem;
   font: inherit;
   font-weight: 600;
-  background: var(--accent);
-  color: #fff;
+  background: var(--btn);
+  color: var(--btn-text);
 }
 
 button:disabled {
@@ -90,6 +148,21 @@ button.link {
   font-weight: 600;
 }
 
+button.cta {
+  width: 100%;
+  margin: 0.75rem 0 0.35rem;
+  padding: 0.95rem 1rem;
+  font-size: 1.05rem;
+}
+
+button.ghost {
+  width: 100%;
+  margin-bottom: 0.55rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--line);
+}
+
 .row-between {
   display: flex;
   justify-content: space-between;
@@ -98,6 +171,10 @@ button.link {
 
 .error {
   color: var(--danger);
+}
+
+a {
+  color: var(--accent);
 }
 
 .cards,
@@ -114,8 +191,8 @@ button.link {
   display: grid;
   gap: 0.25rem;
   text-align: left;
-  background: #fff;
-  color: inherit;
+  background: var(--surface);
+  color: var(--text);
   border: 1px solid var(--line);
 }
 
@@ -125,7 +202,7 @@ button.link {
   font-size: 0.72rem;
   padding: 0.12rem 0.4rem;
   border-radius: 999px;
-  background: #e3f3ec;
+  background: var(--badge-bg);
   color: var(--accent);
 }
 
@@ -134,18 +211,28 @@ button.link {
   border-radius: 12px;
   padding: 0.85rem;
   margin-bottom: 0.75rem;
-  background: #fff;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .consent .body {
   font-size: 0.9rem;
   line-height: 1.45;
   white-space: pre-wrap;
+  color: var(--text);
 }
 
 .slots button {
   width: 100%;
-  background: #fff;
-  color: var(--tg-text);
+  background: var(--surface);
+  color: var(--text);
   border: 1px solid var(--line);
+}
+
+.video-wrap {
+  color: var(--text);
+}
+
+.video-wrap .muted {
+  color: var(--muted);
 }

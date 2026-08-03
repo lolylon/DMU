@@ -10,6 +10,6 @@ import { NotificationsModule } from '../notifications/notifications.module';
   imports: [StorageModule, AuditModule, NotificationsModule],
   providers: [SessionService, RecordingPipelineService],
   controllers: [SessionController],
-  exports: [SessionService],
+  exports: [SessionService, RecordingPipelineService],
 })
 export class SessionModule {}

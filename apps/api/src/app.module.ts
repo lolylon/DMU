@@ -19,6 +19,7 @@ import { MisModule } from './mis/mis.module';
 import { DossierModule } from './dossier/dossier.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { AdminModule } from './admin/admin.module';
+import { FrontdeskModule } from './frontdesk/frontdesk.module';
 import { AuthGuard } from './common/auth.guard';
 import { RolesGuard } from './common/roles.guard';
 import { PmdAccessAuditInterceptor } from './common/pmd-audit.interceptor';
@@ -43,6 +44,7 @@ import { PmdAccessAuditInterceptor } from './common/pmd-audit.interceptor';
     DossierModule,
     CatalogModule,
     AdminModule,
+    FrontdeskModule,
     BootstrapModule,
   ],
   providers: [

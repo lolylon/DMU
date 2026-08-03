@@ -1,12 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import { resolveIinPepper } from './runtime-secrets';
 
 export function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
 export function hashIin(iin: string): string {
-  const pepper = process.env.IIN_PEPPER ?? 'miru_dev_iin_pepper_change_me';
-  return sha256(`${pepper}:${iin}`);
+  return sha256(`${resolveIinPepper()}:${iin}`);
 }
 
 export function generateSessionToken(): string {

@@ -30,30 +30,43 @@ export class StorageService implements OnModuleInit {
     });
   }
 
+  private putOpts(extra: {
+    Bucket: string;
+    Key: string;
+    Body: Buffer;
+    ContentType: string;
+  }) {
+    return {
+      ...extra,
+      // MinIO / S3 SSE-S3 (architecture §4.5). Host volume encryption still required for attestation.
+      ServerSideEncryption: 'AES256' as const,
+    };
+  }
+
   async assertHealthy() {
     await this.ensureBucket(this.recordingsBucket);
     await this.ensureBucket(this.artifactsBucket);
     const probeKey = `health/${Date.now()}.txt`;
     const body = Buffer.from(`ok ${new Date().toISOString()}`, 'utf8');
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.recordingsBucket,
-        Key: probeKey,
-        Body: body,
-        ContentType: 'text/plain',
-      }),
-    );
+    await this.client.send(new PutObjectCommand(this.putOpts({
+      Bucket: this.recordingsBucket,
+      Key: probeKey,
+      Body: body,
+      ContentType: 'text/plain',
+    })));
     return true;
   }
 
   async putRecordingObject(key: string, body: Buffer, contentType: string) {
     await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.recordingsBucket,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-      }),
+      new PutObjectCommand(
+        this.putOpts({
+          Bucket: this.recordingsBucket,
+          Key: key,
+          Body: body,
+          ContentType: contentType,
+        }),
+      ),
     );
     return {
       bucket: this.recordingsBucket,
@@ -65,12 +78,14 @@ export class StorageService implements OnModuleInit {
 
   async putArtifactObject(key: string, body: Buffer, contentType: string) {
     await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.artifactsBucket,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-      }),
+      new PutObjectCommand(
+        this.putOpts({
+          Bucket: this.artifactsBucket,
+          Key: key,
+          Body: body,
+          ContentType: contentType,
+        }),
+      ),
     );
     return {
       bucket: this.artifactsBucket,

@@ -52,6 +52,8 @@ model Organization {
   catalogPublic  Boolean  @default(false)
   catalogCity    String?
   catalogAddress String?
+  /// FrontDesk F1 — allow emergency button on approved kiosks
+  emergencyKioskEnabled Boolean @default(false)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -64,6 +66,8 @@ model Organization {
   misInbox       MisInbox[]
   manualBridge   ManualBridgeEntry[]
   readinessItems OrgReadinessItem[]
+  kioskDevices   KioskDevice[]
+  emergencyEvents KioskEmergencyEvent[]
 }
 
 model Department {
@@ -148,19 +152,22 @@ model Membership {
 }
 
 model Patient {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  iinHash        String
-  fullName       String
-  birthDate      DateTime?
-  phone          String?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  cases          Case[]
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  iinHash         String
+  fullName        String
+  birthDate       DateTime?
+  phone           String?
+  /// Telegram private chat id (= user id) for Mini App notifications
+  telegramChatId  String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  cases           Case[]
 
   @@unique([organizationId, iinHash])
   @@index([organizationId])
+  @@index([telegramChatId])
 }
 
 model Case {
@@ -645,4 +652,61 @@ model ProfileQueueItem {
   updatedAt            DateTime  @updatedAt
 
   @@index([organizationId, profileCode, status, createdAt])
+}
+
+/// FrontDesk F1 — physical kiosk terminal bound to an MO
+model KioskDevice {
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id])
+  label              String
+  /// Human-readable code shown on pairing screen
+  deviceCode         String       @unique
+  tokenHash          String       @unique
+  /// One-time short claim code (hashed); cleared after successful pair
+  pairCodeHash       String?      @unique
+  pairExpiresAt      DateTime?
+  appVersion         String       @default("0.1.0")
+  otaChannel         String       @default("pilot")
+  enabled            Boolean      @default(true)
+  /// Must be true + org.emergencyKioskEnabled for emergency button
+  emergencyEnabled   Boolean      @default(false)
+  lastSeenAt         DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  emergencyEvents KioskEmergencyEvent[]
+
+  @@index([organizationId, enabled])
+}
+
+model KioskEmergencyEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  deviceId       String
+  device         KioskDevice  @relation(fields: [deviceId], references: [id])
+  status         String       @default("OPEN")
+  note           String?
+  createdAt      DateTime     @default(now())
+  acknowledgedAt DateTime?
+  closedAt       DateTime?
+
+  @@index([organizationId, status, createdAt])
+  @@index([deviceId, createdAt])
+}
+
+/// Published kiosk builds for OTA check (Electron/web shell)
+model FrontDeskRelease {
+  id             String   @id @default(cuid())
+  channel        String
+  version        String
+  downloadUrl    String?
+  checksumSha256 String?
+  notesRu        String?
+  mandatory      Boolean  @default(false)
+  publishedAt    DateTime @default(now())
+
+  @@unique([channel, version])
+  @@index([channel, publishedAt])
 }

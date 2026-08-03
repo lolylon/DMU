@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { VideoRoom } from './VideoRoom';
+import { initTelegramWebApp } from './telegram';
 
 type CaseRow = {
   id: string;
@@ -24,6 +25,42 @@ type CaseDetail = CaseRow & {
 type Slot = { id: string; startsAt: string; endsAt: string; consultantUserId: string };
 
 const tokenKey = 'miru_patient_token';
+const nameKey = 'miru_patient_name';
+const pendingCatalogKey = 'miru_pending_catalog';
+const SLOT_RANGE_DAYS = 14;
+
+const statusRu: Record<string, string> = {
+  CREATED: 'Создан',
+  AWAITING_CONSENT: 'Нужны согласия',
+  AWAITING_BOOKING: 'Выберите время',
+  BOOKED: 'Запись оформлена',
+  IN_SESSION: 'Идёт консультация',
+  AWAITING_CONCLUSION: 'Ждём заключение',
+  AWAITING_SIGNATURE: 'На подписи',
+  AWAITING_PATIENT_DELIVERY: 'Заключение готово',
+  CLOSED: 'Закрыт',
+  CANCELLED: 'Отменён',
+  RESCHEDULED: 'Перенос',
+};
+
+function labelStatus(s: string) {
+  return statusRu[s] ?? s;
+}
+
+function consentTitle(kind: string) {
+  const map: Record<string, string> = {
+    offer: 'Оферта',
+    dmu_consent: 'Согласие на ДМУ',
+    pmd_consent: 'Согласие на обработку данных',
+  };
+  return map[kind] ?? 'Документ';
+}
+
+function slotWindow() {
+  const from = new Date().toISOString();
+  const to = new Date(Date.now() + SLOT_RANGE_DAYS * 86400000).toISOString();
+  return { from, to };
+}
 
 async function api<T>(path: string, init: RequestInit = {}, token?: string | null): Promise<T> {
   const headers = new Headers(init.headers);
@@ -43,14 +80,16 @@ type Step = 'auth' | 'list' | 'case' | 'catalog';
 export function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(tokenKey));
   const [step, setStep] = useState<Step>(token ? 'list' : 'auth');
-  const [iin, setIin] = useState('900000000009');
+  const [iin, setIin] = useState('');
   const [code, setCode] = useState('');
-  const [debugHint, setDebugHint] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tgChatId, setTgChatId] = useState<string | null>(null);
+  const [inTelegram, setInTelegram] = useState(false);
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [catalogOrgs, setCatalogOrgs] = useState<
     Array<{ id: string; nameRu: string; catalogCity: string | null }>
   >([]);
+  const [catalogOrgId, setCatalogOrgId] = useState<string | null>(null);
   const [catalogOffers, setCatalogOffers] = useState<
     Array<{ profileCode: string; titleRu: string; durationMin: number; descriptionRu: string }>
   >([]);
@@ -58,6 +97,7 @@ export function App() {
   const [detail, setDetail] = useState<CaseDetail | null>(null);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [busy, setBusy] = useState(false);
+  const [patientName, setPatientName] = useState(() => localStorage.getItem(nameKey) || '');
   const [media, setMedia] = useState<null | { livekitUrl: string; token: string; sessionId: string }>(
     null,
   );
@@ -81,7 +121,7 @@ export function App() {
         method: 'POST',
         body: JSON.stringify({ iin }),
       });
-      setDebugHint(res.debugCode ? `Код (только dev): ${res.debugCode}` : res.message);
+      // Dev: silently prefill code when API returns debugCode (no UI hint)
       if (res.debugCode) setCode(res.debugCode);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка');
@@ -97,15 +137,88 @@ export function App() {
     try {
       const res = await api<{ accessToken: string }>('/api/patient/auth/verify', {
         method: 'POST',
-        body: JSON.stringify({ iin, code }),
+        body: JSON.stringify({
+          iin,
+          code,
+          ...(tgChatId ? { telegramChatId: tgChatId } : {}),
+        }),
       });
       localStorage.setItem(tokenKey, res.accessToken);
       setToken(res.accessToken);
-      setStep('list');
+      if (tgChatId) {
+        api('/api/patient/me/telegram', {
+          method: 'POST',
+          body: JSON.stringify({ telegramChatId: tgChatId }),
+        }, res.accessToken).catch(() => undefined);
+      }
+      if (sessionStorage.getItem(pendingCatalogKey) === '1') {
+        sessionStorage.removeItem(pendingCatalogKey);
+        await openCatalog(res.accessToken);
+      } else {
+        setStep('list');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openCatalog(_token?: string) {
+    setError(null);
+    try {
+      const orgs = await api<typeof catalogOrgs>('/api/catalog/organizations');
+      setCatalogOrgs(orgs);
+      setCatalogOrgName(null);
+      setCatalogOrgId(null);
+      setCatalogOffers([]);
+      setStep('catalog');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка витрины');
+    }
+  }
+
+  async function startBookingOffer(profileCode: string) {
+    if (!token || !catalogOrgId) return;
+    const name = patientName.trim();
+    if (name.length < 2) {
+      setError('Укажите ФИО');
+      return;
+    }
+    localStorage.setItem(nameKey, name);
+    setBusy(true);
+    setError(null);
+    try {
+      const d = await api<CaseDetail>(
+        '/api/patient/cases/from-catalog',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            organizationId: catalogOrgId,
+            profileCode,
+            patientFullName: name,
+          }),
+        },
+        token,
+      );
+      setDetail(d);
+      setStep('case');
+      await refreshSlotsForCase(d);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка записи');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshSlotsForCase(d: CaseDetail) {
+    if (!token) return;
+    if (d.status === 'AWAITING_BOOKING' || d.status === 'RESCHEDULED') {
+      const { from, to } = slotWindow();
+      const s = await api<Slot[]>(`/api/patient/cases/${d.id}/slots?from=${from}&to=${to}`, {}, token);
+      setSlots(s);
+    } else {
+      setSlots([]);
     }
   }
 
@@ -115,9 +228,23 @@ export function App() {
   }
 
   useEffect(() => {
+    const tg = initTelegramWebApp();
+    setInTelegram(tg.inTelegram);
+    setTgChatId(tg.chatId);
+  }, []);
+
+  useEffect(() => {
     if (!token || step !== 'list') return;
     loadCases(token).catch((err) => setError(err instanceof Error ? err.message : 'Ошибка'));
   }, [token, step]);
+
+  useEffect(() => {
+    if (!token || !tgChatId) return;
+    api('/api/patient/me/telegram', {
+      method: 'POST',
+      body: JSON.stringify({ telegramChatId: tgChatId }),
+    }, token).catch(() => undefined);
+  }, [token, tgChatId]);
 
   async function openCase(id: string) {
     if (!token) return;
@@ -127,14 +254,7 @@ export function App() {
       const d = await api<CaseDetail>(`/api/patient/cases/${id}`, {}, token);
       setDetail(d);
       setStep('case');
-      if (d.status === 'AWAITING_BOOKING' || d.status === 'RESCHEDULED') {
-        const from = new Date().toISOString();
-        const to = new Date(Date.now() + 7 * 86400000).toISOString();
-        const s = await api<Slot[]>(`/api/patient/cases/${id}/slots?from=${from}&to=${to}`, {}, token);
-        setSlots(s);
-      } else {
-        setSlots([]);
-      }
+      await refreshSlotsForCase(d);
       if (
         d.status === 'AWAITING_PATIENT_DELIVERY' ||
         d.status === 'CLOSED' ||
@@ -184,6 +304,24 @@ export function App() {
     }
   }
 
+  async function cancelAppt() {
+    if (!token || !detail?.activeAppointment) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/api/patient/appointments/${detail.activeAppointment.id}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'patient_cancel_miniapp' }),
+      }, token);
+      setMedia(null);
+      await openCase(detail.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось отменить');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function logout() {
     localStorage.removeItem(tokenKey);
     setToken(null);
@@ -195,13 +333,23 @@ export function App() {
   if (step === 'catalog') {
     return (
       <main className="shell">
-        <button type="button" className="link" onClick={() => setStep('auth')}>
+        <button type="button" className="link" onClick={() => setStep(token ? 'list' : 'auth')}>
           ← Назад
         </button>
         <p className="brand">Miru</p>
-        <h1>Витрина ДМУ</h1>
-        <p className="lead">Публичный каталог МО (без ПМД). Запись — после входа по ИИН.</p>
+        <h1>Запись</h1>
         {error && <p className="error">{error}</p>}
+        {token && (
+          <label className="name-field">
+            Ваше ФИО
+            <input
+              value={patientName}
+              onChange={(e) => setPatientName(e.target.value)}
+              autoComplete="name"
+              placeholder="Как к вам обращаться"
+            />
+          </label>
+        )}
         {!catalogOrgName && (
           <ul className="cards">
             {catalogOrgs.map((o) => (
@@ -217,6 +365,7 @@ export function App() {
                       }>(`/api/catalog/organizations/${o.id}/offers`);
                       setCatalogOffers(res.offers);
                       setCatalogOrgName(res.organization.nameRu);
+                      setCatalogOrgId(o.id);
                     } catch (err) {
                       setError(err instanceof Error ? err.message : 'Ошибка');
                     }
@@ -232,7 +381,14 @@ export function App() {
         )}
         {catalogOrgName && (
           <section>
-            <button type="button" className="link" onClick={() => setCatalogOrgName(null)}>
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                setCatalogOrgName(null);
+                setCatalogOrgId(null);
+              }}
+            >
               ← К списку МО
             </button>
             <h2>{catalogOrgName}</h2>
@@ -240,14 +396,27 @@ export function App() {
               {catalogOffers.map((off) => (
                 <li key={off.profileCode} className="consent">
                   <h3>{off.titleRu}</h3>
-                  <p className="muted">{off.durationMin} мин · {off.profileCode}</p>
-                  <p>{off.descriptionRu}</p>
+                  <p className="muted">{off.durationMin} мин</p>
+                  {off.descriptionRu ? <p>{off.descriptionRu}</p> : null}
+                  {token && catalogOrgId ? (
+                    <button type="button" disabled={busy} onClick={() => void startBookingOffer(off.profileCode)}>
+                      Записаться
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sessionStorage.setItem(pendingCatalogKey, '1');
+                        setStep('auth');
+                      }}
+                    >
+                      Войти и записаться
+                    </button>
+                  )}
                 </li>
               ))}
+              {catalogOffers.length === 0 && <li className="muted">Нет активных услуг</li>}
             </ul>
-            <button type="button" onClick={() => setStep('auth')}>
-              Войти и записаться
-            </button>
           </section>
         )}
       </main>
@@ -258,26 +427,12 @@ export function App() {
     return (
       <main className="shell">
         <p className="brand">Miru</p>
-        <h1>Вход пациента</h1>
-        <p className="lead">ИИН + код подтверждения (ТЗ 7.1.1). Медицинское содержание в SMS не передаётся.</p>
-        <button
-          type="button"
-          className="link"
-          onClick={async () => {
-            setError(null);
-            try {
-              const orgs = await api<typeof catalogOrgs>('/api/catalog/organizations');
-              setCatalogOrgs(orgs);
-              setCatalogOrgName(null);
-              setCatalogOffers([]);
-              setStep('catalog');
-            } catch (err) {
-              setError(err instanceof Error ? err.message : 'Ошибка витрины');
-            }
-          }}
-        >
-          Смотреть витрину МО
-        </button>
+        <h1>Вход</h1>
+        <p className="lead">
+          {inTelegram
+            ? 'Введите ИИН и код подтверждения. Уведомления придут в этот чат.'
+            : 'Введите ИИН и код из SMS.'}
+        </p>
         <form className="form" onSubmit={requestCode}>
           <label>
             ИИН
@@ -289,15 +444,25 @@ export function App() {
         </form>
         <form className="form" onSubmit={verify}>
           <label>
-            Код из SMS
+            Код
             <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" />
           </label>
-          {debugHint && <p className="hint">{debugHint}</p>}
           {error && <p className="error">{error}</p>}
           <button type="submit" disabled={busy || !code}>
             Войти
           </button>
         </form>
+        <button
+          type="button"
+          className="link"
+          style={{ marginTop: '1rem' }}
+          onClick={() => {
+            sessionStorage.setItem(pendingCatalogKey, '1');
+            void openCatalog();
+          }}
+        >
+          Сначала посмотреть услуги
+        </button>
       </main>
     );
   }
@@ -313,23 +478,27 @@ export function App() {
         </div>
         <h1>Мои консультации</h1>
         {error && <p className="error">{error}</p>}
+        <button type="button" className="cta" disabled={busy} onClick={() => void openCatalog()}>
+          Записаться
+        </button>
         <ul className="cards">
           {cases.map((c) => (
             <li key={c.id}>
               <button type="button" className="card" onClick={() => openCase(c.id)}>
-                <span className="badge">{c.status}</span>
-                <span>{c.mode}</span>
-                {c.activeAppointment && (
+                <span className="badge">{labelStatus(c.status)}</span>
+                {c.activeAppointment ? (
                   <span className="muted">
                     {new Date(c.activeAppointment.startsAt).toLocaleString('ru-KZ', {
                       timeZone: 'Asia/Almaty',
                     })}
                   </span>
+                ) : (
+                  <span className="muted">Онлайн-консультация</span>
                 )}
               </button>
             </li>
           ))}
-          {cases.length === 0 && <li className="muted">Пока нет случаев</li>}
+          {cases.length === 0 && <li className="muted">Пока нет записей</li>}
         </ul>
       </main>
     );
@@ -344,7 +513,7 @@ export function App() {
       {detail && (
         <>
           <p>
-            Статус: <span className="badge">{detail.status}</span>
+            Статус: <span className="badge">{labelStatus(detail.status)}</span>
           </p>
           {detail.activeAppointment && (
             <p>
@@ -358,19 +527,17 @@ export function App() {
           {detail.status === 'AWAITING_CONSENT' && (
             <section>
               <h2>Согласия</h2>
-              <p className="muted">Нужно принять оферту и согласия (ТЗ 7.1). Акцепт фиксируется с хэшем текста.</p>
+              <p className="muted">Примите документы, чтобы выбрать время.</p>
               {detail.pendingConsents.map((d) => (
                 <article key={d.id} className="consent">
-                  <h3>
-                    {d.kind} v{d.version}
-                  </h3>
+                  <h3>{consentTitle(d.kind)}</h3>
                   <p className="body">{d.body}</p>
                   <button type="button" disabled={busy} onClick={() => acceptConsent(d.id)}>
                     Принимаю
                   </button>
                 </article>
               ))}
-              {detail.pendingConsents.length === 0 && <p className="muted">Все документы приняты</p>}
+              {detail.pendingConsents.length === 0 && <p className="muted">Готово…</p>}
             </section>
           )}
 
@@ -392,8 +559,12 @@ export function App() {
 
           {(detail.status === 'BOOKED' || detail.status === 'IN_SESSION') && (
             <section>
-              <h2>Видеосессия</h2>
-              <p className="muted">Без доступной записи сессия не стартует (ТЗ 6.3.3).</p>
+              <h2>Видеосвязь</h2>
+              {detail.activeAppointment && detail.status === 'BOOKED' && (
+                <button type="button" className="ghost" disabled={busy} onClick={() => void cancelAppt()}>
+                  Отменить запись
+                </button>
+              )}
               {!media ? (
                 <button
                   type="button"
@@ -435,13 +606,13 @@ export function App() {
           {conclusionView?.available && (
             <section>
               <h2>Заключение врача</h2>
-              <p className="muted">
-                Статус: {conclusionView.status}
-                {conclusionView.signedAt &&
-                  ` · подписано ${new Date(conclusionView.signedAt).toLocaleString('ru-KZ', {
+              {conclusionView.signedAt && (
+                <p className="muted">
+                  {new Date(conclusionView.signedAt).toLocaleString('ru-KZ', {
                     timeZone: 'Asia/Almaty',
-                  })}`}
-              </p>
+                  })}
+                </p>
+              )}
               {conclusionView.conclusionText && <p>{conclusionView.conclusionText}</p>}
               {conclusionView.recommendations && (
                 <>
@@ -475,14 +646,6 @@ export function App() {
                 >
                   Получил(а) заключение
                 </button>
-              )}
-              {conclusionView.deliveredAt && (
-                <p className="hint">
-                  Получено{' '}
-                  {new Date(conclusionView.deliveredAt).toLocaleString('ru-KZ', {
-                    timeZone: 'Asia/Almaty',
-                  })}
-                </p>
               )}
             </section>
           )}

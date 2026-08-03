@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { MembershipRole } from '@prisma/client';
 import { validatePasswordPolicy } from '@miru/shared';
-import { PrismaService } from '../prisma/prisma.service';
+import { AdminPrismaService } from '../prisma/admin-prisma.service';
 import { IdentityService } from '../identity/identity.service';
 import { ConsentService } from '../consent/consent.service';
 import { AuditService } from '../audit/audit.service';
@@ -26,7 +26,8 @@ const STAFF_ROLES: MembershipRole[] = [
 @Injectable()
 export class AdminService {
   constructor(
-    private readonly prisma: PrismaService,
+    /** miru_admin role — no SQL grants on PMD content tables (§4.3) */
+    private readonly prisma: AdminPrismaService,
     private readonly identity: IdentityService,
     private readonly consent: ConsentService,
     private readonly audit: AuditService,

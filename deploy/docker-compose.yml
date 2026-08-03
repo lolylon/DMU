@@ -84,6 +84,22 @@ services:
     volumes:
       - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
 
+  # Optional public-edge TURN for self-host (profile remote-edge). Prefer LiveKit Cloud for pilot.
+  coturn:
+    profiles: ["remote-edge"]
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - "-n"
+      - "--log-file=stdout"
+      - "--listening-port=3478"
+      - "--fingerprint"
+      - "--lt-cred-mech"
+      - "--user=miru:miru_turn_dev_only_change_me"
+      - "--realm=miru.local"
+    # On Windows Docker, host networking is limited — use a Linux VPS for remote-edge.
+
   # TZ 6.3 — RoomComposite / track egress into MinIO
   livekit-egress:
     image: livekit/egress:v1.8.4

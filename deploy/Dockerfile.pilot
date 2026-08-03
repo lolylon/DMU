@@ -1,0 +1,43 @@
+# Multi-stage: API + static frontends for a small pilot VPS (~2 users)
+FROM node:20-bookworm-slim AS deps
+WORKDIR /app
+RUN corepack enable && apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/
+COPY apps/web-staff/package.json apps/web-staff/
+COPY apps/web-admin/package.json apps/web-admin/
+COPY apps/miniapp/package.json apps/miniapp/
+COPY apps/web-frontdesk/package.json apps/web-frontdesk/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+
+FROM deps AS build
+COPY . .
+RUN pnpm --filter @miru/shared build \
+ && pnpm --filter @miru/api exec prisma generate \
+ && pnpm --filter @miru/api build \
+ && pnpm --filter @miru/web-staff build \
+ && pnpm --filter @miru/web-admin build \
+ && pnpm --filter @miru/miniapp build \
+ && pnpm --filter @miru/api deploy --prod /out/api \
+ && cp -R apps/api/prisma /out/api/prisma \
+ && cp -R apps/api/dist /out/api/dist
+
+FROM node:20-bookworm-slim AS api
+WORKDIR /app
+ENV NODE_ENV=production
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/api ./
+EXPOSE 3000
+CMD ["sh", "-c", "DATABASE_URL=\"${DATABASE_URL_MIGRATE:-$DATABASE_URL}\" npx prisma migrate deploy && node dist/main.js"]
+
+FROM caddy:2.8-alpine AS web
+COPY --from=build /app/apps/miniapp/dist /srv/miniapp
+COPY --from=build /app/apps/web-staff/dist /srv/staff
+COPY --from=build /app/apps/web-admin/dist /srv/admin
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+EXPOSE 80 443

@@ -1,0 +1,139 @@
+# Small pilot stack (≈2 concurrent users). LiveKit = Cloud (env), not local SFU.
+# Security: ALLOW_BOOTSTRAP=false by default; one-shot seed needs BOOTSTRAP_SECRET.
+# Usage on VPS:
+#   cp deploy/.env.pilot.example .env.pilot
+#   # edit secrets + DOMAIN + LiveKit Cloud keys
+#   docker compose -f deploy/docker-compose.pilot.yml --env-file .env.pilot up -d --build
+
+name: miru-pilot
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-miru}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-miru}
+      MIRU_APP_PASSWORD: ${MIRU_APP_PASSWORD:?set MIRU_APP_PASSWORD}
+      MIRU_ADMIN_PASSWORD: ${MIRU_ADMIN_PASSWORD:?set MIRU_ADMIN_PASSWORD}
+    volumes:
+      - pilot_pg:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./postgres/02-role-passwords.sh:/docker-entrypoint-initdb.d/02-role-passwords.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-miru} -d ${POSTGRES_DB:-miru}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - pilot_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-miru_minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    volumes:
+      - pilot_minio:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-miru_minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 3
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb -p local/miru-artifacts || true
+        mc mb -p local/miru-recordings || true
+        mc anonymous set none local/miru-artifacts
+        mc anonymous set none local/miru-recordings
+        mc encrypt set sse-s3 local/miru-artifacts || true
+        mc encrypt set sse-s3 local/miru-recordings || true
+        exit 0
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.pilot
+      target: api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      TZ: Asia/Almaty
+      MIRU_REQUIRE_SECRETS: "true"
+      ALLOW_BOOTSTRAP: ${ALLOW_BOOTSTRAP:-false}
+      BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET:-}
+      ALLOW_LOCAL_LIVEKIT: "false"
+      IIN_PEPPER: ${IIN_PEPPER:?set IIN_PEPPER}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      # Runtime = least privilege; migrations use migrate URL (superuser)
+      DATABASE_URL: postgresql://miru_app:${MIRU_APP_PASSWORD}@postgres:5432/${POSTGRES_DB:-miru}?schema=public
+      DATABASE_URL_MIGRATE: postgresql://${POSTGRES_USER:-miru}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-miru}?schema=public
+      ADMIN_DATABASE_URL: postgresql://miru_admin:${MIRU_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB:-miru}?schema=public
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-miru_minio}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      S3_BUCKET_ARTIFACTS: miru-artifacts
+      S3_BUCKET_RECORDINGS: miru-recordings
+      LIVEKIT_URL: ${LIVEKIT_URL:?set LIVEKIT_URL}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-${LIVEKIT_URL}}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}
+      LIVEKIT_EGRESS_ENABLED: "false"
+      REQUIRE_LIVEKIT_EGRESS: "false"
+      CORS_ORIGINS: https://${DOMAIN},https://staff.${DOMAIN},https://admin.${DOMAIN}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBAPP_URL: https://${DOMAIN}
+      NCA_CMS_VERIFY_ENABLED: "false"
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.pilot
+      target: web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+    volumes:
+      - pilot_caddy:/data
+
+volumes:
+  pilot_pg:
+  pilot_redis:
+  pilot_minio:
+  pilot_caddy:

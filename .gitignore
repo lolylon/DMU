@@ -7,6 +7,8 @@ coverage
 .env
 .env.local
 .env.*.local
+.env.pilot
+
 *.log
 .DS_Store
 Thumbs.db

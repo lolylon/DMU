@@ -138,7 +138,7 @@ export class SessionService {
       sessionId: session.id,
       caseId,
       status: session.status,
-      livekitUrl: process.env.LIVEKIT_URL ?? 'ws://localhost:7880',
+      livekitUrl: this.pipeline.clientLivekitUrl(),
       token,
       roomName,
       recording: {
@@ -171,6 +171,9 @@ export class SessionService {
         'Recording subsystem unavailable. Session cannot continue — please reschedule (TZ 6.3.3)',
       );
     }
+
+    // Ensure client URL is home-reachable before minting a join token
+    this.pipeline.clientLivekitUrl();
 
     await this.prisma.sessionParticipant.upsert({
       where: {
@@ -207,7 +210,7 @@ export class SessionService {
       sessionId: session.id,
       caseId: session.caseId,
       status: session.status,
-      livekitUrl: process.env.LIVEKIT_URL ?? 'ws://localhost:7880',
+      livekitUrl: this.pipeline.clientLivekitUrl(),
       token,
       roomName: session.livekitRoomName,
       recording: {

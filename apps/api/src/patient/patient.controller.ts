@@ -21,6 +21,17 @@ class VerifyCodeDto {
   @IsString()
   @MinLength(4)
   code!: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{5,20}$/)
+  telegramChatId?: string;
+}
+
+class BindTelegramDto {
+  @IsString()
+  @Matches(/^\d{5,20}$/)
+  telegramChatId!: string;
 }
 
 class AcceptConsentDto {
@@ -35,6 +46,25 @@ class AcceptConsentDto {
 class BookSlotDto {
   @IsString()
   slotId!: string;
+}
+
+class StartCatalogDto {
+  @IsString()
+  organizationId!: string;
+
+  @IsString()
+  @MinLength(1)
+  profileCode!: string;
+
+  @IsString()
+  @MinLength(2)
+  patientFullName!: string;
+}
+
+class CancelApptDto {
+  @IsString()
+  @MinLength(2)
+  reason!: string;
 }
 
 @Controller('patient')
@@ -59,13 +89,26 @@ export class PatientController {
       code: body.code,
       ip,
       userAgent,
+      telegramChatId: body.telegramChatId,
     });
+  }
+
+  @Post('me/telegram')
+  @Roles(MembershipRole.PATIENT)
+  bindTelegram(@CurrentUser() user: AuthUser, @Body() body: BindTelegramDto) {
+    return this.patient.bindTelegramChat(user, body.telegramChatId);
   }
 
   @Get('cases')
   @Roles(MembershipRole.PATIENT)
   listCases(@CurrentUser() user: AuthUser) {
     return this.patient.listMyCases(user);
+  }
+
+  @Post('cases/from-catalog')
+  @Roles(MembershipRole.PATIENT)
+  fromCatalog(@CurrentUser() user: AuthUser, @Body() body: StartCatalogDto) {
+    return this.patient.startFromCatalog(user, body);
   }
 
   @Get('cases/:id')
@@ -101,5 +144,15 @@ export class PatientController {
   @Roles(MembershipRole.PATIENT)
   book(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() body: BookSlotDto) {
     return this.patient.bookSlot(user, id, body.slotId);
+  }
+
+  @Post('appointments/:id/cancel')
+  @Roles(MembershipRole.PATIENT)
+  cancelAppt(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() body: CancelApptDto,
+  ) {
+    return this.patient.cancelAppointment(user, id, body.reason);
   }
 }
