@@ -1,0 +1,648 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MembershipRole {
+  PATIENT
+  AMBULATORY_WORKER
+  CONSULTANT
+  REGISTRAR
+  DEPARTMENT_HEAD
+  ORG_ADMIN
+  AUDITOR
+  TECH_IMPLEMENTATION
+  TECH_SUPPORT
+  PLATFORM_ADMIN
+}
+
+enum CaseStatus {
+  CREATED
+  AWAITING_CONSENT
+  AWAITING_BOOKING
+  BOOKED
+  IN_SESSION
+  AWAITING_CONCLUSION
+  AWAITING_SIGNATURE
+  AWAITING_PATIENT_DELIVERY
+  CLOSED
+  CANCELLED
+  RESCHEDULED
+  NO_SHOW
+  OVERDUE
+}
+
+enum CaseMode {
+  REALTIME
+  ASYNC
+}
+
+model Organization {
+  id             String   @id @default(cuid())
+  bin            String   @unique
+  nameKk         String
+  nameRu         String
+  status         String   @default("onboarding")
+  /// manual | mock | zhetysu | damumed (TZ 5.1–5.2)
+  misMode        String   @default("manual")
+  catalogPublic  Boolean  @default(false)
+  catalogCity    String?
+  catalogAddress String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  departments    Department[]
+  memberships    Membership[]
+  patients       Patient[]
+  cases          Case[]
+  catalogOffers  CatalogOffer[]
+  misOutbox      MisOutbox[]
+  misInbox       MisInbox[]
+  manualBridge   ManualBridgeEntry[]
+  readinessItems OrgReadinessItem[]
+}
+
+model Department {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  nameKk         String
+  nameRu         String
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+}
+
+/// Manual + auto readiness checklist for MO go-live (W4 / scenario D)
+model OrgReadinessItem {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  key            String
+  labelRu        String
+  required       Boolean      @default(true)
+  /// auto = derived from data; manual = tech marks done
+  kind           String       @default("auto")
+  done           Boolean      @default(false)
+  doneAt         DateTime?
+  doneByUserId   String?
+  note           String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, key])
+  @@index([organizationId, required, done])
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String?   @unique
+  phone            String?
+  iinHash          String?
+  passwordHash     String?
+  displayName      String
+  totpSecret       String?
+  totpEnabled      Boolean   @default(false)
+  isBlocked        Boolean   @default(false)
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  memberships Membership[]
+  accessLogs  AccessLog[]
+  sessions    AuthSession[]
+}
+
+/// Server-side sessions: revocable, TTL (NFR 3.4)
+model AuthSession {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip        String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Membership {
+  id             String         @id @default(cuid())
+  userId         String
+  user           User           @relation(fields: [userId], references: [id])
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  role           MembershipRole
+  createdAt      DateTime       @default(now())
+
+  @@unique([userId, organizationId, role])
+  @@index([organizationId])
+}
+
+model Patient {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  iinHash        String
+  fullName       String
+  birthDate      DateTime?
+  phone          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  cases          Case[]
+
+  @@unique([organizationId, iinHash])
+  @@index([organizationId])
+}
+
+model Case {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  patientId      String
+  patient        Patient      @relation(fields: [patientId], references: [id])
+  mode           CaseMode     @default(REALTIME)
+  status         CaseStatus   @default(CREATED)
+  profileCode    String?
+  closeReason    String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  statusHistory CaseStatusHistory[]
+  participants  CaseParticipant[]
+  acceptances   ConsentAcceptance[]
+  appointments  Appointment[]
+  sessions      ConsultationSession[]
+  chatMessages  ChatMessage[]
+  files         CaseFile[]
+  conclusion    Conclusion?
+  misOutbox     MisOutbox[]
+  manualBridge  ManualBridgeEntry?
+  profileQueue  ProfileQueueItem?
+
+  @@index([organizationId, status])
+  @@index([patientId])
+}
+
+/// Append-only evidence — no UPDATE/DELETE for app DB role (NFR 5.5)
+model CaseStatusHistory {
+  id         String      @id @default(cuid())
+  caseId     String
+  case       Case        @relation(fields: [caseId], references: [id])
+  fromStatus CaseStatus?
+  toStatus   CaseStatus
+  reason     String?
+  actorId    String?
+  createdAt  DateTime    @default(now())
+
+  @@index([caseId, createdAt])
+}
+
+model CaseParticipant {
+  id     String         @id @default(cuid())
+  caseId String
+  case   Case           @relation(fields: [caseId], references: [id])
+  userId String
+  role   MembershipRole
+
+  @@unique([caseId, userId, role])
+  @@index([userId])
+}
+
+/// Versioned legal text — immutable after publish
+model ConsentDocument {
+  id             String   @id @default(cuid())
+  kind           String
+  version        String
+  language       String
+  body           String
+  contentHash    String
+  publishedAt    DateTime @default(now())
+  organizationId String?
+
+  acceptances ConsentAcceptance[]
+
+  @@unique([kind, version, language, organizationId])
+}
+
+/// Append-only evidence (TZ 7.1.8)
+model ConsentAcceptance {
+  id                String          @id @default(cuid())
+  consentDocumentId String
+  consentDocument   ConsentDocument @relation(fields: [consentDocumentId], references: [id])
+  caseId            String?
+  case              Case?           @relation(fields: [caseId], references: [id])
+  patientId         String?
+  method            String
+  acceptedAt        DateTime        @default(now())
+  acceptedAtTz      String
+  ip                String?
+  deviceId          String?
+  mediatorName      String?
+  contentHash       String
+
+  @@index([caseId])
+}
+
+/// Append-only PMD access journal (TZ 7.4)
+model AccessLog {
+  id             String   @id @default(cuid())
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id])
+  role           String?
+  organizationId String?
+  objectType     String
+  objectId       String
+  action         String
+  ip             String?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([objectType, objectId])
+}
+
+model TechActionLog {
+  id             String   @id @default(cuid())
+  actorUserId    String
+  organizationId String?
+  action         String
+  payloadMeta    Json?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+}
+
+enum SlotStatus {
+  FREE
+  BOOKED
+  BLOCKED
+}
+
+enum AppointmentStatus {
+  ACTIVE
+  CANCELLED
+  RESCHEDULED
+}
+
+/// Weekly template for consultant (TZ 6.2.1)
+model ConsultantSchedule {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  consultantUserId    String
+  /// 1=Monday .. 7=Sunday (ISO)
+  dayOfWeek           Int
+  startTime           String
+  endTime             String
+  slotDurationMinutes Int      @default(30)
+  breakStart          String?
+  breakEnd            String?
+  timezone            String   @default("Asia/Almaty")
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([organizationId, consultantUserId])
+  @@unique([consultantUserId, dayOfWeek, startTime, endTime])
+}
+
+/// Concrete bookable unit (TZ 6.2.2–6.2.6)
+model Slot {
+  id               String     @id @default(cuid())
+  organizationId   String
+  consultantUserId String
+  startsAt         DateTime
+  endsAt           DateTime
+  status           SlotStatus @default(FREE)
+  blockedReason    String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  appointment Appointment?
+
+  /// Unique consultant+start prevents double-booking race (TZ 6.2.6)
+  @@unique([consultantUserId, startsAt])
+  @@index([organizationId, startsAt, status])
+  @@index([consultantUserId, startsAt])
+}
+
+model Appointment {
+  id              String            @id @default(cuid())
+  organizationId  String
+  caseId          String
+  case            Case              @relation(fields: [caseId], references: [id])
+  slotId          String            @unique
+  slot            Slot              @relation(fields: [slotId], references: [id])
+  bookedByUserId  String
+  status          AppointmentStatus @default(ACTIVE)
+  cancelReason    String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([caseId])
+  @@index([organizationId, status])
+}
+
+/// Delivery journal for notifications (TZ 6.5.5) — stub channel for now
+model NotificationLog {
+  id             String   @id @default(cuid())
+  organizationId String?
+  caseId         String?
+  channel        String
+  templateKey    String
+  recipientRef   String
+  payloadMeta    Json?
+  status         String
+  error          String?
+  createdAt      DateTime @default(now())
+
+  @@index([caseId, createdAt])
+}
+
+/// Patient IIN confirmation codes (TZ 7.1.1) — codes stored hashed only
+model PatientAuthChallenge {
+  id         String    @id @default(cuid())
+  iinHash    String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([iinHash, createdAt])
+}
+
+enum SessionStatus {
+  PENDING_RECORDING
+  LIVE
+  ENDED
+  FAILED
+}
+
+/// Real-time DMU session (TZ 6.3)
+model ConsultationSession {
+  id              String        @id @default(cuid())
+  organizationId  String
+  caseId          String
+  case            Case          @relation(fields: [caseId], references: [id])
+  livekitRoomName String        @unique
+  status          SessionStatus @default(PENDING_RECORDING)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  durationSec     Int?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  participants SessionParticipant[]
+  recording    SessionRecording?
+  chatMessages ChatMessage[]
+  files        CaseFile[]
+
+  @@index([caseId])
+  @@index([organizationId, status])
+}
+
+model SessionParticipant {
+  id         String               @id @default(cuid())
+  sessionId  String
+  session    ConsultationSession  @relation(fields: [sessionId], references: [id])
+  userId     String
+  role       MembershipRole
+  joinedAt   DateTime?
+  leftAt     DateTime?
+  createdAt  DateTime             @default(now())
+
+  @@unique([sessionId, userId])
+  @@index([userId])
+}
+
+enum RecordingStatus {
+  STARTING
+  ACTIVE
+  FINALIZING
+  READY
+  FAILED
+}
+
+/// Evidence artifact — checksum at create/finalize (TZ 7.2, NFR 5.3)
+model SessionRecording {
+  id           String               @id @default(cuid())
+  sessionId    String               @unique
+  session      ConsultationSession  @relation(fields: [sessionId], references: [id])
+  status       RecordingStatus      @default(STARTING)
+  storageKey   String
+  checksumSha256 String?
+  byteSize     Int?
+  egressId     String?
+  error        String?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+}
+
+model ChatMessage {
+  id         String              @id @default(cuid())
+  caseId     String
+  case       Case                @relation(fields: [caseId], references: [id])
+  sessionId  String?
+  session    ConsultationSession? @relation(fields: [sessionId], references: [id])
+  authorId   String
+  body       String
+  createdAt  DateTime            @default(now())
+
+  @@index([caseId, createdAt])
+  @@index([sessionId, createdAt])
+}
+
+model CaseFile {
+  id             String               @id @default(cuid())
+  caseId         String
+  case           Case                 @relation(fields: [caseId], references: [id])
+  sessionId      String?
+  session        ConsultationSession? @relation(fields: [sessionId], references: [id])
+  uploadedById   String
+  fileName       String
+  contentType    String
+  storageKey     String
+  checksumSha256 String
+  byteSize       Int
+  createdAt      DateTime             @default(now())
+
+  @@index([caseId, createdAt])
+}
+
+enum ConclusionStatus {
+  DRAFT
+  READY_TO_SIGN
+  SIGNED
+  DELIVERED
+}
+
+/// One conclusion per case; edits after sign = new ConclusionVersion (TZ 6.4.6)
+model Conclusion {
+  id               String           @id @default(cuid())
+  organizationId   String
+  caseId           String           @unique
+  case             Case             @relation(fields: [caseId], references: [id])
+  authorUserId     String
+  status           ConclusionStatus @default(DRAFT)
+  /// TZ 6.4.2 required clinical fields (draft editable)
+  complaints       String           @default("")
+  anamnesis        String           @default("")
+  examination      String           @default("")
+  conclusionText   String           @default("")
+  recommendations  String           @default("")
+  authorPosition   String           @default("")
+  deliveredAt      DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  versions ConclusionVersion[]
+
+  @@index([organizationId, status])
+  @@index([authorUserId, status])
+}
+
+/// Immutable signed versions — append-only (NFR 5.2)
+model ConclusionVersion {
+  id               String     @id @default(cuid())
+  conclusionId     String
+  conclusion       Conclusion @relation(fields: [conclusionId], references: [id])
+  versionNumber    Int
+  previousVersionId String?
+  contentJson      String
+  contentHash      String
+  signedAt         DateTime?
+  /// CMS / CAdES from NCALayer (base64)
+  cmsSignature     String?
+  signerIinHash    String?
+  certSubject      String?
+  certSerial       String?
+  signatureAlg     String?
+  verificationOk   Boolean?
+  pdfStorageKey    String?
+  createdAt        DateTime   @default(now())
+
+  @@unique([conclusionId, versionNumber])
+  @@index([conclusionId, createdAt])
+}
+
+/// Public service catalog / витрина (TZ W3)
+model CatalogOffer {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  profileCode    String
+  titleRu        String
+  titleKk        String
+  descriptionRu  String       @default("")
+  descriptionKk  String       @default("")
+  durationMin    Int          @default(30)
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, profileCode])
+  @@index([organizationId, active])
+}
+
+enum MisOutboxStatus {
+  PENDING
+  SENT
+  FAILED
+  MANUAL_PENDING
+  MANUAL_DONE
+}
+
+/// Idempotent outbound MIS sync (architecture §3.1 / §5.1)
+model MisOutbox {
+  id              String          @id @default(cuid())
+  organizationId  String
+  organization    Organization    @relation(fields: [organizationId], references: [id])
+  caseId          String
+  case            Case            @relation(fields: [caseId], references: [id])
+  eventType       String
+  payloadJson     String
+  status          MisOutboxStatus @default(PENDING)
+  idempotencyKey  String          @unique
+  externalRef     String?
+  attempts        Int             @default(0)
+  lastError       String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([organizationId, status, createdAt])
+  @@index([caseId])
+}
+
+model MisInbox {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  externalId     String
+  eventType      String
+  payloadJson    String
+  processedAt    DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, externalId])
+  @@index([organizationId, createdAt])
+}
+
+/// Manual bridge: referral + «внесено в МИС» (TZ 5.2)
+model ManualBridgeEntry {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  caseId          String       @unique
+  case            Case         @relation(fields: [caseId], references: [id])
+  referralNumber  String?
+  renderedAt      DateTime?
+  enteredInMis    Boolean      @default(false)
+  enteredInMisAt  DateTime?
+  enteredByUserId String?
+  notes           String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([organizationId, enteredInMis, renderedAt])
+}
+
+/// Assembled case dossier package metadata (≤60s SLA)
+model CaseDossier {
+  id             String   @id @default(cuid())
+  organizationId String
+  caseId         String
+  storageKey     String
+  checksumSha256 String
+  byteSize       Int
+  assemblyMs     Int
+  itemCount      Int
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  @@index([caseId, createdAt])
+  @@index([organizationId, createdAt])
+}
+
+/// FIFO queue by clinical profile (W2 / TZ)
+model ProfileQueueItem {
+  id                   String    @id @default(cuid())
+  organizationId       String
+  profileCode          String
+  caseId               String    @unique
+  case                 Case      @relation(fields: [caseId], references: [id])
+  status               String    @default("PENDING")
+  assignedConsultantId String?
+  assignedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([organizationId, profileCode, status, createdAt])
+}

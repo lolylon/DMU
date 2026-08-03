@@ -1,0 +1,18 @@
+{
+  "pdf_options": {
+    "format": "A4",
+    "margin": {
+      "top": "18mm",
+      "bottom": "18mm",
+      "left": "16mm",
+      "right": "16mm"
+    },
+    "printBackground": true
+  },
+  "stylesheet": [],
+  "body_class": ["markdown-body"],
+  "marked_options": {
+    "headerIds": false,
+    "mangle": false
+  }
+}

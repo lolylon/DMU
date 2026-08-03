@@ -1,0 +1,116 @@
+# Miru Platform — local infrastructure (RK self-hosted stack)
+# Usage: docker compose -f deploy/docker-compose.yml up -d
+
+name: miru
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: miru
+      POSTGRES_PASSWORD: miru_dev_only_change_me
+      POSTGRES_DB: miru
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miru -d miru"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: miru_minio
+      MINIO_ROOT_PASSWORD: miru_dev_only_change_me
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 miru_minio miru_dev_only_change_me;
+      mc mb -p local/miru-artifacts || true;
+      mc mb -p local/miru-recordings || true;
+      mc anonymous set none local/miru-artifacts;
+      mc anonymous set none local/miru-recordings;
+      exit 0;
+      "
+
+  livekit:
+    image: livekit/livekit-server:v1.8.4
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+
+  # TZ 6.3 — RoomComposite / track egress into MinIO
+  livekit-egress:
+    image: livekit/egress:v1.8.4
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+      minio:
+        condition: service_started
+    environment:
+      EGRESS_CONFIG_BODY: |
+        api_key: mirudevkey
+        api_secret: miru_livekit_dev_secret_change_me_32chars
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis:6379
+        insecure: true
+        logging:
+          level: info
+    volumes:
+      - /dev/null:/dev/null
+    # egress needs docker socket or privileged chrome — for prod use documented LiveKit egress host
+    privileged: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

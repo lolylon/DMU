@@ -1,0 +1,28 @@
+{
+  "name": "miru-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Miru Remote + FrontDesk platform",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @miru/api --filter @miru/web-staff --filter @miru/web-admin --filter @miru/miniapp run dev",
+    "dev:api": "pnpm --filter @miru/api dev",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md,yml}\"",
+    "db:migrate": "pnpm --filter @miru/api prisma:migrate",
+    "db:generate": "pnpm --filter @miru/api prisma:generate",
+    "docker:up": "docker compose -f deploy/docker-compose.yml up -d",
+    "docker:down": "docker compose -f deploy/docker-compose.yml down"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2"
+  }
+}

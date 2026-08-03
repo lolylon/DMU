@@ -1,0 +1,12 @@
+# LiveKit config — development. Rotate keys before shared/prod environments.
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+redis:
+  address: redis:6379
+keys:
+  mirudevkey: miru_livekit_dev_secret_change_me_32chars
+logging:
+  level: info

@@ -1,0 +1,22 @@
+erDiagram
+  Organization ||--o{ Department : has
+  Organization ||--o{ Membership : tenancy
+  Organization ||--o{ Patient : owns
+  Organization ||--o{ Case : owns
+  User ||--o{ Membership : has
+  Patient ||--o{ Case : subject
+  Case ||--o{ CaseParticipant : involves
+  Case ||--o{ CaseStatusHistory : append_only
+  Case ||--o{ Session : may_have
+  Case ||--o{ Conclusion : results_in
+  Case ||--o{ ChatMessage : has
+  Case ||--o{ CaseFile : has
+  ConsentDocument ||--o{ ConsentAcceptance : append_only
+  Case ||--o{ ConsentAcceptance : linked
+  Conclusion ||--o{ ConclusionVersion : versions
+  Session ||--o{ SessionParticipant : has
+  Session ||--|| SessionRecording : recorded
+  User ||--o{ AccessLog : append_only
+  Organization ||--o{ AccessLog : scoped
+  Organization ||--o{ TechActionLog : scoped
+  Case ||--o{ MisOutbox : sync
