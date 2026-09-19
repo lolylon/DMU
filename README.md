@@ -12,6 +12,7 @@
 - [Честный статус соответствия](docs/compliance-status.md) ← читать перед приёмкой
 - [Чеклист недель](docs/week-checklist.md)
 - [Поставка НФТ §11](docs/delivery-nfr11.md)
+- [Шаблон благодарственного письма](docs/thank-you-letter-template.md)
 
 ## Быстрый старт (Windows)
 
